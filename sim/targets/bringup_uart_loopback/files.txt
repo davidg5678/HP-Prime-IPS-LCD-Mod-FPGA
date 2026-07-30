@@ -1,0 +1,3 @@
+src/common/uart_tx.v
+src/common/uart_rx.v
+sim/targets/bringup_uart_loopback/tb_uart_loopback.v

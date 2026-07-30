@@ -1,0 +1,24 @@
+# Gowin IDE headless build output (regenerate via tools/build/gowin_build.sh)
+impl/
+*.gprj.user
+
+# Open-source toolchain build output
+build_oss/
+
+# Simulation scratch
+sim/.build/
+*.vcd
+*.vvp
+
+# Captured logic-analyzer data — keep dir structure, not binary artifacts
+captures/*
+!captures/README.md
+
+# Python
+**/__pycache__/
+*.pyc
+.venv/
+
+# macOS / editor
+.DS_Store
+.vscode/

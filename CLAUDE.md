@@ -1,0 +1,104 @@
+# HP_PRIME_LCD — Claude Code Reference
+
+HP Prime calculator LCD reverse-engineering project on a Sipeed Tang Nano 20K
+(Gowin GW2AR-LV18QN88C8/I7). Four phases — see `docs/architecture.md`. This repo is currently
+in **proto-phase-1**: bootstrapping the agentic dev loop itself. See `PROGRESS.md` for current
+status before assuming anything below has actually been run/verified this session.
+
+## Directory layout
+
+- `src/common/` — reusable RTL modules across all phases.
+- `src/targets/<name>/` — one synthesizable build target: `<name>_top.v` (+ any other sources),
+  `<name>.cst`, `files.txt` (ordered source list, common modules first), `top_module.txt`.
+- `sim/targets/<name>/` — one testbench, same manifest convention.
+- `tools/{setup,sim,build}/` — all automation scripts (see Commands below).
+- `python/` — host-side tooling (Phase 2+ decode/render, hardware self-test scripts).
+- `captures/` — logic-analyzer capture artifacts (gitignored, regenerable).
+- `boards/tangnano20k/pinout.md` — full pin reference table.
+
+Adding a new phase's RTL means adding a new `src/targets/<name>/` (and matching
+`sim/targets/<name>/`) directory — the build/sim scripts are generic and should not need
+editing.
+
+## Commands
+
+| Action | Command |
+|---|---|
+| Environment self-check | `make check-env` |
+| Simulate (default target `bringup_uart_loopback`) | `make sim` or `make sim SIM_TARGET=<name>` |
+| Headless synth+PnR+bitstream (Gowin, primary) | `make build` or `make build BUILD_TARGET=<name>` |
+| Open-source lint/build sanity check | `make build-oss` |
+| Flash to SRAM (volatile, fast iteration) | `make flash-sram` |
+| Flash to on-board flash (persistent) | `make flash` |
+| Hardware self-test over USB serial | `make selftest-hw` |
+
+## Toolchain paths
+
+- Gowin IDE: `/Applications/GowinIDE.app`. Headless shell:
+  `.../Contents/Resources/Gowin_EDA/IDE/bin/gw_sh`. **Must** be run with
+  `DYLD_LIBRARY_PATH` and `DYLD_FRAMEWORK_PATH` both set to
+  `.../Contents/Resources/Gowin_EDA/IDE/lib`, and invoked as `gw_sh <script.tcl>` (not `-c`).
+  This is already encoded in `tools/build/gowin_build.sh` — don't invoke `gw_sh` directly
+  without it; the failure mode is silent (it just doesn't do anything useful).
+- Open-source path (`yosys`, `nextpnr-himbaechel`, `gowin_pack`/apycula): install via
+  `tools/setup/install_tools.sh`, which fetches `oss-cad-suite` (these are NOT plain Homebrew
+  formulae) into `~/.local/oss-cad-suite`. Not on PATH by default — either
+  `export PATH="$HOME/.local/oss-cad-suite/bin:$PATH"` for the current shell, or add it to your
+  shell profile permanently (the install script prints this reminder). `icarus-verilog`,
+  `verilator`, `openfpgaloader` are plain Homebrew formulae (note: the brew formula name is
+  `icarus-verilog`, the binary is `iverilog`).
+- Flashing: `openFPGALoader -b tangnano20k <file>.fs` (add `-f` to persist to flash). Fallback
+  if openFPGALoader has trouble: Gowin's own
+  `.../Contents/Resources/Gowin_EDA/Programmer/bin/programmer_cli`.
+- Device string: `GW2AR-18C` / `GW2AR-LV18QN88C8/I7` (the placeholder project had this wrong —
+  missing the `R` — already fixed in `HP_PRIME_LCD.gprj`). `HP_PRIME_LCD.gprj` is
+  GUI-only/best-effort; the headless build scripts generate their own self-contained `.tcl` and
+  don't read it.
+
+## Testbench PASS/FAIL contract
+
+Every testbench must print exactly one of:
+- `PASS: <summary>` and call `$finish` on success
+- `FAIL: <reason>` and call `$fatal(1)` on failure
+
+plus a watchdog `initial #<cycle-ceiling> $fatal(1);` block. `tools/sim/run_sim.sh` greps for
+this and sets its exit code accordingly — this is the contract every new testbench (and
+`serial_selftest.py`-style hardware scripts) must follow so results are unambiguous to parse.
+
+## Mock-mode convention (stays consistent across Phases 1, 3, 4)
+
+Every phase's `<name>_top.v` instantiates both a mock pattern generator and the real signal
+path, muxed at **runtime** by a `mode` register (default = MOCK at reset/power-on), switchable
+via a UART command byte over the same command channel established in
+`bringup_selftest_top.v` (`0xAA` = resync, `0x4D` = 'M' = force mock, `0x52` = 'R' = force
+real). This is a single-bitstream, runtime-switchable pattern — NOT `` `ifdef ``-based build
+variants — chosen specifically so an agent can flip between self-test and real-hardware modes
+without re-synthesizing or re-flashing. See `src/targets/bringup_selftest/` for the reference
+implementation. Full rationale in `docs/architecture.md`.
+
+## Known gotchas
+
+- No board may be attached — `make sim`, `make build`, `make build-oss` all work without
+  hardware; only `make flash*` / `make selftest-hw` need it.
+- LED polarity (`leds[5:0]`) is active-low per convention here; verify against actual behavior
+  on first hardware bring-up and adjust if needed.
+- `impl/`, `build_oss/`, `sim/.build/` are all regenerated build output — gitignored, never
+  hand-edit or commit.
+- `gw_sh`'s default `impl/` output directory is relative to its CWD, not the `.tcl` script's
+  location. `gowin_build.sh` `cd`s to the repo root (not `impl/`) before invoking it, and looks
+  for the deterministically-named `impl/pnr/project.fs` (Gowin's default basename when no
+  project name is set) rather than globbing `*.fs` — an earlier version of this script globbed
+  and silently picked up a stale bitstream left over from a previous build. It also rejects a
+  `project.fs` that predates the current invocation, in case `gw_sh` fails silently.
+- **Never point `nextpnr-himbaechel --vopt cst=` or `gowin_pack -s` at a `.cst` file under
+  `src/targets/`** — both tools rewrite/annotate the constraints file they're given (with
+  internal post-place-and-route site names, not pin numbers), clobbering the human-authored
+  source of truth the vendor `gw_sh` build also depends on. `oss_cad_build.sh` copies the `.cst`
+  into `build_oss/<target>/` first and only ever touches that copy.
+- `nextpnr-himbaechel` needs the **full Gowin part number** as `--device` (e.g.
+  `GW2AR-LV18QN88C8/I7`, not the short `GW2AR-18C`) — the short form defaults to an invalid
+  speed grade (`'ES'`) and fails. It also separately needs `--vopt family=GW2A-18C` for the
+  GW2A series (undocumented in `--help`, found by reading its error message).
+- apycula's device database has no separate `R`-variant file — `gowin_pack -d` must be given
+  `GW2A-18C`, not `GW2AR-18C` (`GW2AR-18C.msgpack.xz` doesn't exist; the R-variant shares the
+  base fabric database).
