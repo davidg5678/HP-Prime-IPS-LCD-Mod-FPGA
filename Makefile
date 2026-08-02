@@ -8,6 +8,6 @@ build:        ; tools/build/gowin_build.sh $(BUILD_TARGET)
 build-oss:    ; tools/build/oss_cad_build.sh $(BUILD_TARGET)
 flash-sram:   ; tools/build/flash.sh $(BUILD_TARGET)
 flash:        ; tools/build/flash.sh $(BUILD_TARGET) --persist
-selftest-hw:  ; python3 python/tools/serial_selftest.py
+selftest-hw:  ; python3 python/tools/serial_selftest.py $(if $(PORT),--port $(PORT))
 check-env:    ; tools/setup/check_env.sh
 clean:        ; rm -rf impl build_oss sim/.build

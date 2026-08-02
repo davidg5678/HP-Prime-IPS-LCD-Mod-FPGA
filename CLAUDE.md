@@ -55,6 +55,27 @@ editing.
   GUI-only/best-effort; the headless build scripts generate their own self-contained `.tcl` and
   don't read it.
 
+## Verification comes first — read `docs/verification.md`
+
+**Before writing RTL for a new phase, read `docs/verification.md`.** The short version, which is
+not negotiable in this repo:
+
+- **Every synthesizable target gets its own top-level testbench**, not just submodule tests.
+  proto-phase-1 had a passing `uart_tx`↔`uart_rx` loopback test the whole time while the top level
+  had three bugs that made it permanently unable to work. Module tests verify the parts you
+  thought about; integration tests verify the assumptions between them.
+- **Simulate before you synthesize.** `make sim` is seconds, `make build` is minutes, a hardware
+  debug session is hours. "It built" says nothing about whether it works.
+- **Treat every toolchain warning as an error until you've read it.** Grep the build log for
+  `WARN` after every build.
+- **Measure, don't assume** — assert on values recovered from the design (e.g. actual bit time on
+  the wire), not on the constants you believe you set.
+- **Change one variable at a time**, keeping a known-good state to fall back to.
+
+The cost of skipping this, measured on a design with two UARTs and an LFSR: three debugging
+sessions and an entire unnecessary Arduino-bridge subsystem, built to route around a bug that was
+never in that part of the system.
+
 ## Testbench PASS/FAIL contract
 
 Every testbench must print exactly one of:
@@ -71,13 +92,43 @@ Every phase's `<name>_top.v` instantiates both a mock pattern generator and the 
 path, muxed at **runtime** by a `mode` register (default = MOCK at reset/power-on), switchable
 via a UART command byte over the same command channel established in
 `bringup_selftest_top.v` (`0xAA` = resync, `0x4D` = 'M' = force mock, `0x52` = 'R' = force
-real). This is a single-bitstream, runtime-switchable pattern — NOT `` `ifdef ``-based build
+real). Note the TX side is **burst-on-demand, not free-running**: `0xAA` reloads the seed and
+arms exactly `BURST_LEN` (256) bytes, then the line goes idle. Free-running TX leaves a receiver
+no way to establish framing. Mode bytes select the source for the *next* burst but don't arm one
+— send the mode byte, then `0xAA`, and drain the full burst before the next command. This is a single-bitstream, runtime-switchable pattern — NOT `` `ifdef ``-based build
 variants — chosen specifically so an agent can flip between self-test and real-hardware modes
 without re-synthesizing or re-flashing. See `src/targets/bringup_selftest/` for the reference
 implementation. Full rationale in `docs/architecture.md`.
 
 ## Known gotchas
 
+- **Check the Gowin pin report's Function column before mapping any signal to a pin.** Pin 88
+  (used as `rst` originally) is the device's `MODE0` configuration strap; the board's strapping
+  overrides `PULL_MODE=UP`, so it reads low and held the entire design in reset for three
+  sessions. `bringup_selftest` now uses an internal power-on reset. Look for `MODE*`, `DONE`,
+  `RECONFIG_N`, `READY`, `JTAGSEL_N` in `impl/pnr/project.rpt.txt`. Second instance of the same
+  lesson: **pin 4 (the 27 MHz clock) is `LPLL1_T_in`**, the left PLL's reference input, not one of
+  the five `GCLK_PIN`s — so a design that bypasses the PLL reaches the global clock network through
+  generic routing (`WARN PR1014`). Fix by instantiating an `rPLL`, not by suppressing the warning.
+- **Every target needs a `.sdc` or no timing analysis runs at all.** `tools/build/gowin_build.sh`
+  auto-includes `src/targets/<target>/<target>.sdc` when present. Without one, `gw_sh` emits
+  `WARN (TA1132) 'clk' was determined to be a clock but was not created` and reports zero timing
+  violations — because it checked zero paths. A clean build log is not a timing signoff. With the
+  constraint, `bringup_selftest` reports 351 paths, 0 setup/0 hold violations, Fmax 205 MHz. Read
+  the numbers out of `impl/pnr/project_tr_content.html` (`project.tr.html` is only a frameset).
+- **Give every register a reset term, especially "is it alive?" indicators.** The heartbeat
+  counter was the one register declared `always @(posedge clk)` with no reset, so `leds[0]` kept
+  blinking while everything else sat in reset — making "the bitstream is alive" check true and
+  useless at the same time. A liveness LED that cannot distinguish *configured* from *running* is
+  worse than no LED.
+- **`gw_sh` warnings are not cosmetic.** `WARN (EX3638) 'x' is already implicitly declared` means a
+  signal was used before its declaration, creating an implicit net. Gowin proceeds; iverilog
+  refuses. Grep the build log for `WARN` after each build.
+- **UART is over the onboard BL616 — no external adapter.** It exposes two interfaces on the same
+  VID:PID (`0403:6010`); interface **A** is JTAG (and echoes writes, which looks like a working
+  link), interface **B** is the UART on pins 69/70. It also logs its own firmware messages in ASCII
+  on interface B during JTAG programming, so drain the port before testing right after a flash.
+  See `boards/tangnano20k/pinout.md`.
 - No board may be attached — `make sim`, `make build`, `make build-oss` all work without
   hardware; only `make flash*` / `make selftest-hw` need it.
 - LED polarity (`leds[5:0]`) is active-low per convention here; verify against actual behavior

@@ -4,11 +4,16 @@ IO_PORT "clk" IO_TYPE=LVCMOS33 PULL_MODE=UP;
 IO_LOC "rst" 88;
 IO_PORT "rst" IO_TYPE=LVCMOS33 PULL_MODE=UP;
 
+// Onboard BL616 debug MCU's UART (PIN69_SYS_TX / PIN70_SYS_RX on the Sipeed
+// schematic) -- no Arduino bridge in the loop. Both pins are plain GPIO: the
+// Gowin pin report shows an empty Function column for them, unlike pin 88's
+// MODE0 strap. PULL_MODE=UP on the input so an undriven line idles high
+// (UART idle level) rather than floating.
 IO_LOC "uart_rx" 70;
-IO_PORT "uart_rx" IO_TYPE=LVCMOS33;
+IO_PORT "uart_rx" IO_TYPE=LVCMOS33 PULL_MODE=UP;
 
 IO_LOC "uart_tx" 69;
-IO_PORT "uart_tx" IO_TYPE=LVCMOS33;
+IO_PORT "uart_tx" IO_TYPE=LVCMOS33 DRIVE=8;
 
 IO_LOC "leds[0]" 15;
 IO_PORT "leds[0]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;

@@ -1,0 +1,5 @@
+src/common/lfsr8.v
+src/common/uart_tx.v
+src/common/uart_rx.v
+src/targets/bringup_selftest/bringup_selftest_top.v
+sim/targets/bringup_selftest/tb_bringup_selftest.v
