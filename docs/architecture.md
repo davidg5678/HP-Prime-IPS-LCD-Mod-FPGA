@@ -1,5 +1,10 @@
 # Architecture
 
+> **See `docs/verification.md` first.** Every phase below is described in terms of what it builds;
+> that document covers how you find out whether it works, and why on an FPGA that has to come
+> first rather than last. Each phase's "AI-development optimization" note below exists precisely
+> to keep the verification loop in simulation, where it is fast and fully observable.
+
 ## Background: what's being reverse-engineered
 
 The HP Prime calculator's LCD panel is believed to be driven by a serial-RGB-to-parallel-RGB

@@ -12,9 +12,33 @@ Verified by cross-referencing Sipeed's `TangNano-20K-example` repo `.cst` files 
 |---|---|---|
 | `clk` | 4 | 27 MHz onboard oscillator |
 | `rst` | 88 | ⚠️ **`MODE0` config strap — do NOT use as a reset.** See below. Diagnostic only (`leds[4]`) |
-| `uart_rx` | 71 | temporary Arduino Uno bridge, host → FPGA (was pin 70/BL616; see `arduino_bridge.md`) |
-| `uart_tx` | 72 | temporary Arduino Uno bridge, FPGA → host (was pin 69/BL616; see `arduino_bridge.md`) |
+| `uart_rx` | 70 | onboard BL616 UART (`PIN70_SYS_RX`), host → FPGA |
+| `uart_tx` | 69 | onboard BL616 UART (`PIN69_SYS_TX`), FPGA → host |
 | `leds[0..5]` | 15, 16, 17, 18, 19, 20 | Onboard LEDs, active-low |
+
+### The onboard BL616 UART works — no external adapter needed
+
+Verified 2026-08-02 at **1,000,000 baud** (`27 MHz / 1 MBaud = DIV 27`, exact), no external
+bridge. The BL616 exposes two interfaces over one USB connection, both enumerating with identical
+VID:PID `0403:6010`, serial and location:
+
+| Interface | macOS device (example) | Role |
+|---|---|---|
+| A | `/dev/cu.usbserial-...170` | DirtyJTAG-v2 — used by `openFPGALoader`. **Not** a UART |
+| B | `/dev/cu.usbserial-...171` | The UART wired to FPGA pins 69/70 — **this is the one you want** |
+
+The only discriminator is the interface index appended to the device name, so
+`serial_selftest.py` sorts by device name and takes the last. Two gotchas:
+
+- **Interface A echoes what you write to it.** Probing it looks like a working-but-corrupt link.
+- **The BL616 logs its own firmware messages on interface B during JTAG programming** (e.g.
+  ` Write: 0x400000`, in ASCII). A self-test run immediately after `make flash-sram` can read log
+  text and report it as a data mismatch. `serial_selftest.py` drains until the line is quiet first.
+
+An earlier session concluded this path was unusable from macOS because `AppleUSBFTDI` claims both
+interfaces exclusively, and built an Arduino Uno bridge to work around it. **That conclusion was
+wrong** — the FPGA was being held in reset (see below), so every path was silent and the silence
+was misattributed to the host driver. The Arduino bridge has been removed.
 
 ### ⚠️ Pin 88 is a configuration strap, not a general-purpose input
 
@@ -52,11 +76,10 @@ for a 480x272 panel; re-verify against whatever panel is actually sourced for Ph
 relying on them.
 
 The onboard BL616 MCU provides the composite USB device (DirtyJTAG-v2 JTAG + CDC-ACM UART) —
-no external USB-serial adapter is needed for the UART path above.
+no external USB-serial adapter is needed for the UART path above. Confirmed working; see the
+BL616 section near the top of this file for interface selection and gotchas.
 
-**2026-08-02 update:** in practice, the BL616's UART interface is not currently usable from
-macOS (the built-in `AppleUSBFTDI` kernel driver claims both FTDI-emulated interfaces
-exclusively). Until that's resolved, hardware self-tests use a temporary Arduino Uno
-USB-serial bridge instead, on pins 71/72 rather than the BL616-wired 69/70 (which are hard-wired
-straight to the BL616 and would electrically contend with an external driver) — see
-`boards/tangnano20k/arduino_bridge.md`.
+Note the BL616 is genuinely a `BL616C-S0-Q2I-QFN40` (schematic `USB_JTAG.kicad_sch`, chip `U5`) —
+it emulates an FTDI FT2232H USB descriptor purely for driver compatibility, which is why the host
+reports FTDI VID:PID `0403:6010`. Pins 69/70 wire straight to it with no jumper, so do not drive
+them externally.

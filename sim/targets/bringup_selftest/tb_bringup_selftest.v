@@ -14,7 +14,7 @@
 //
 module tb_bringup_selftest;
     localparam integer CLK_HZ  = 27_000_000;
-    localparam integer BAUD    = 38_400;    // must match bringup_selftest_top.v
+    localparam integer BAUD    = 1_000_000; // must match bringup_selftest_top.v
     localparam integer HALF_PS = 500_000_000_000 / CLK_HZ; // 18518 ps
     localparam integer BIT_PS  = 1_000_000_000_000 / BAUD; // 8680555 ps
     localparam [7:0]   SEED    = 8'h01;

@@ -55,6 +55,27 @@ editing.
   GUI-only/best-effort; the headless build scripts generate their own self-contained `.tcl` and
   don't read it.
 
+## Verification comes first — read `docs/verification.md`
+
+**Before writing RTL for a new phase, read `docs/verification.md`.** The short version, which is
+not negotiable in this repo:
+
+- **Every synthesizable target gets its own top-level testbench**, not just submodule tests.
+  proto-phase-1 had a passing `uart_tx`↔`uart_rx` loopback test the whole time while the top level
+  had three bugs that made it permanently unable to work. Module tests verify the parts you
+  thought about; integration tests verify the assumptions between them.
+- **Simulate before you synthesize.** `make sim` is seconds, `make build` is minutes, a hardware
+  debug session is hours. "It built" says nothing about whether it works.
+- **Treat every toolchain warning as an error until you've read it.** Grep the build log for
+  `WARN` after every build.
+- **Measure, don't assume** — assert on values recovered from the design (e.g. actual bit time on
+  the wire), not on the constants you believe you set.
+- **Change one variable at a time**, keeping a known-good state to fall back to.
+
+The cost of skipping this, measured on a design with two UARTs and an LFSR: three debugging
+sessions and an entire unnecessary Arduino-bridge subsystem, built to route around a bug that was
+never in that part of the system.
+
 ## Testbench PASS/FAIL contract
 
 Every testbench must print exactly one of:
@@ -94,9 +115,11 @@ implementation. Full rationale in `docs/architecture.md`.
 - **`gw_sh` warnings are not cosmetic.** `WARN (EX3638) 'x' is already implicitly declared` means a
   signal was used before its declaration, creating an implicit net. Gowin proceeds; iverilog
   refuses. Grep the build log for `WARN` after each build.
-- **Every synthesizable target needs its own top-level testbench**, not just module-level ones.
-  `bringup_uart_loopback` tested `uart_tx` against `uart_rx` and passed while the top level had a
-  2x-LFSR-advance bug and unframeable free-running TX. See `sim/targets/bringup_selftest/`.
+- **UART is over the onboard BL616 — no external adapter.** It exposes two interfaces on the same
+  VID:PID (`0403:6010`); interface **A** is JTAG (and echoes writes, which looks like a working
+  link), interface **B** is the UART on pins 69/70. It also logs its own firmware messages in ASCII
+  on interface B during JTAG programming, so drain the port before testing right after a flash.
+  See `boards/tangnano20k/pinout.md`.
 - No board may be attached — `make sim`, `make build`, `make build-oss` all work without
   hardware; only `make flash*` / `make selftest-hw` need it.
 - LED polarity (`leds[5:0]`) is active-low per convention here; verify against actual behavior

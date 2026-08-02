@@ -3,6 +3,69 @@
 Update this file at the end of each work session so a future session (human or agent) can
 pick up cold. Newest entries at the top.
 
+## 2026-08-02 (later session, part 2) — Arduino removed; BL616 UART works at 1 Mbaud
+
+**Status: proto-phase-1 COMPLETE. `make selftest-hw` → `PASS: hardware serial self-test, 256 bytes
+verified, 0 errors` at 1,000,000 baud over the board's own USB connection, no external hardware.
+5/5 consecutive runs, mock/real mux verified over the same link. The Arduino bridge has been
+deleted from the repo.**
+
+### The BL616 UART was never broken
+
+Confirmed directly: the previous sessions' conclusion that macOS's `AppleUSBFTDI` made this path
+unusable was a **ghost**. The FPGA was held in reset, so pins 69/70 were as silent as everything
+else, and the silence was attributed to the host driver. An entire subsystem — Uno, resistor
+divider, `SoftwareSerial`, two sketch rewrites, `arduino-cli` toolchain, a second self-test script,
+~500 lines of docs — was built to route around a bug that was never on that side of the wire.
+
+`uart_rx`→pin 70, `uart_tx`→pin 69 (checked the pin report's Function column first: both plain
+GPIO, empty Function, unlike pin 88's `MODE0`). Worked on the first try.
+
+### Baud raised to 1,000,000
+
+`27 MHz / 1 MBaud = DIV 27` exactly — zero division error, vs. +0.16% at 115200. Simulation
+measured 1000028 baud on the wire before anything was flashed. 26x the Arduino bridge's 38400,
+which was purely a `SoftwareSerial` limitation. Matters for Phase 1, whose capture-buffer drain is
+throughput-bound.
+
+Done as two separately-verified steps — pins first at the known-good 38400, then baud — so each
+change had exactly one suspect.
+
+### BL616 interface selection (two real gotchas)
+
+Both interfaces enumerate with identical VID:PID `0403:6010`, serial and location. The only
+discriminator is the interface index appended to the macOS device name, so `serial_selftest.py`
+sorts by device name and takes the last.
+
+- **Interface A (`...170`) is JTAG and echoes what you write to it** — probing it returns your own
+  bytes back, which reads as a working-but-corrupt link.
+- **Interface B (`...171`) carries the BL616's own firmware log during JTAG programming**, in ASCII
+  (` Write: 0x400000`). A self-test started immediately after `make flash-sram` reads log text and
+  reports it as a data mismatch. `serial_selftest.py` now drains until the line is quiet first.
+
+### Removed
+
+`arduino/`, `boards/tangnano20k/arduino_bridge.md`, `python/tools/arduino_bridge_selftest.py`, and
+the `selftest-bridge` Makefile target. All recoverable from git history (commit `a432019`) if a
+bit-banged bridge is ever needed again — the `SoftwareSerial` throughput analysis in it is sound
+and still applies to any AVR-based bridge.
+
+### Added: `docs/verification.md`
+
+A standing document on why testbench work is the primary instrument in FPGA development, not a
+quality gate applied afterwards — grounded entirely in this project's measured costs. `CLAUDE.md`
+now opens its workflow guidance with it and `docs/architecture.md` points at it first. The central
+data point: proto-phase-1 is two UARTs, an LFSR and a mux; it had a *passing* module-level
+testbench the entire time; the missing top-level testbench took ~20 minutes to write and found
+three real bugs immediately, one of which (`tx_ready` used before declaration) meant the top module
+was not legal Verilog and could never have been simulated at all.
+
+### Open
+
+- `leds[4]` (raw pin 88 level) still not read visually.
+- Still no `.sdc` — see the previous entry; unchanged and now the main remaining risk for Phase 1.
+- `CMD_RESYNC` still doesn't reset `real_data_stub` (harmless; wraps every 256 bytes).
+
 ## 2026-08-02 (later session) — proto-phase-1: hardware self-test PASSES; root cause was reset, not the bridge
 
 **Status: RESOLVED and verified end-to-end. `make selftest-hw` →

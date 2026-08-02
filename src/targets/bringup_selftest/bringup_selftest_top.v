@@ -1,15 +1,15 @@
 module bringup_selftest_top (
     input  wire       clk,      // pin 4, 27 MHz onboard oscillator
     input  wire       rst,      // pin 88, MODE0 config strap -- NOT in the reset path, diagnostic only (leds[4]); see below
-    input  wire       uart_rx,  // pin 71, temporary Arduino Uno bridge, host -> FPGA (was pin 70/BL616, see boards/tangnano20k/arduino_bridge.md)
-    output wire       uart_tx,  // pin 72, temporary Arduino Uno bridge, FPGA -> host (was pin 69/BL616, see boards/tangnano20k/arduino_bridge.md)
+    input  wire       uart_rx,  // pin 70, onboard BL616 UART, host -> FPGA
+    output wire       uart_tx,  // pin 69, onboard BL616 UART, FPGA -> host
     output wire [5:0] leds      // pins 15-20, active-low
 );
-    // BAUD must match FPGA_BAUD in arduino/fpga_uart_bridge/fpga_uart_bridge.ino.
-    // 38400, not 115200: the bridge's bit-banged SoftwareSerial receiver cannot
-    // sustain 115200 back-to-back (it drops ~1 byte in 116) -- the FPGA is not
-    // the bottleneck. See boards/tangnano20k/arduino_bridge.md.
-    localparam CLK_HZ = 27_000_000, BAUD = 38_400;
+    // BAUD must match BAUD in python/tools/serial_selftest.py and the tb.
+    // 1_000_000 divides the 27 MHz clock exactly (DIV = 27, zero error). The
+    // earlier 38400 was a limit of the temporary Arduino bridge's bit-banged
+    // SoftwareSerial, not of this design or the BL616 -- see PROGRESS.md.
+    localparam CLK_HZ = 27_000_000, BAUD = 1_000_000;
     localparam [7:0] SEED = 8'h01;
     localparam [7:0] CMD_RESYNC     = 8'hAA;
     localparam [7:0] CMD_FORCE_MOCK = 8'h4D; // 'M'
