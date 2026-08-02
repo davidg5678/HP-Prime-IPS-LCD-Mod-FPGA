@@ -3,6 +3,73 @@
 Update this file at the end of each work session so a future session (human or agent) can
 pick up cold. Newest entries at the top.
 
+## 2026-08-02 (part 3) — proto-phase-1 leftovers closed: timing constraints, deterministic resync
+
+**Status: proto-phase-1 CLOSED. Both testbenches pass (`PASS: uart_tx/uart_rx loopback, 34 bytes`
+and `PASS: bringup_selftest top-level, baud + LFSR cadence + command channel + mock/real resync`,
+measured baud 1,000,028 on the wire). `make build` now runs real timing analysis: 351 paths,
+0 setup / 0 hold violations, Fmax 205.4 MHz against a 27 MHz constraint. Branch
+`fix/bringup-reset-and-uart-link` merged to `main`.**
+
+Closes the three items the previous entry left open, except `leds[4]`.
+
+### `bringup_selftest.sdc`: the build was reporting 0 violations because it checked 0 paths
+
+`tools/build/gowin_build.sh` already auto-included `src/targets/<target>/<target>.sdc` when
+present, so this needed no script change — the file simply did not exist. Without it `gw_sh`
+emitted `WARN (TA1132) 'clk' was determined to be a clock but was not created` and ran **no**
+static timing analysis whatsoever, while still reporting a clean build. This is the third
+instance in this repo of the same failure shape (after pin 88/MODE0 and the missing top-level
+testbench): **a tool reporting success because it was asked to check nothing.**
+
+With the constraint: 351 paths, 0/0 violations, Fmax 205.4 MHz — 7.6x margin, and independently
+corroborated by nextpnr-himbaechel's ~248 MHz estimate on the open-source path. Read the numbers
+from `impl/pnr/project_tr_content.html`; `project.tr.html` is only a frameset.
+
+The `.sdc` also carries three `set_false_path` exceptions with their justifications inline:
+`uart_rx` (async input, already 2-FF synchronised inside `uart_rx.v`), `rst` (pin 88, a
+diagnostic level wired straight to `leds[4]`, deliberately not in the reset path), and `leds[*]`
+(human-visible, skew irrelevant).
+
+### `WARN (PR1014)` is now explained rather than tolerated
+
+`Generic routing resource will be used to clock signal 'clk_d'`. Pin 4's Function column in
+`impl/pnr/project.rpt.txt` reads **`LPLL1_T_in`** — it is the left PLL's dedicated reference
+input, not one of the five `GCLK_PIN`s. A design that bypasses the PLL therefore reaches the
+PRIMARY global network through generic routing. Harmless at this size; the correct fix is to feed
+pin 4 into an `rPLL`, which **Phase 1 needs anyway** for its oversampling clock — a PLL output
+reaches a global buffer natively. Recorded in `pinout.md` and `CLAUDE.md` as a second instance of
+the pin-88 "read the Function column before mapping a signal" lesson.
+
+### `CMD_RESYNC` now restarts every data source
+
+It previously reloaded the LFSR seed only, so REAL mode resumed from wherever `real_data_stub`
+happened to be. Harmless in isolation — a full `BURST_LEN=256` burst wraps an 8-bit counter
+exactly back to 0, so complete bursts looked identical — but a *partial* burst left the design in
+a state no host command could recover. Phase 1 copies this module, and there the REAL source is a
+capture buffer's read pointer, where "restart the source" has to mean all sources with no
+exceptions to remember. Testbench check 5 covers REAL-mode framing and mid-burst resync, and was
+confirmed **discriminating** by reverting the RTL fix and watching it fail with
+`real_data_stub=0x41` — a test that has never been seen to fail is not yet known to test anything.
+
+### Removed
+
+`src/main.v` — a leftover Gowin GUI placeholder blinky, listed in no `files.txt` and built by
+nothing. `HP_PRIME_LCD.gprj`'s FileList was dangling at it and now points at the real target
+sources.
+
+### Open
+
+- `leds[4]` (raw pin 88 / MODE0 level) still not read visually. The strap explanation is confirmed
+  from the vendor pin report and from the POR fix working, but the pin's level was never directly
+  measured.
+- Pin 87 (second button) never checked for a dual-purpose function; relevant only if a physical
+  reset source is ever wanted.
+- Verilator's informational lint pass emits ~35 warnings, all benign categories (`PROCASSINIT`
+  from reset-value initialisers, `WIDTHTRUNC` on localparam division, unused testbench signals).
+  Not blocking — `run_sim.sh` treats the pass as informational — but the noise floor is high
+  enough to hide a real `LATCH` or width warning once Phase 1 lands. Worth cleaning before then.
+
 ## 2026-08-02 (later session, part 2) — Arduino removed; BL616 UART works at 1 Mbaud
 
 **Status: proto-phase-1 COMPLETE. `make selftest-hw` → `PASS: hardware serial self-test, 256 bytes
