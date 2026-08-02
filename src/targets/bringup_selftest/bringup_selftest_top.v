@@ -81,9 +81,19 @@ module bringup_selftest_top (
     );
 
     // "Real" data source stub — placeholder for Phase 1's actual capture-FIFO output.
+    //
+    // CMD_RESYNC restarts BOTH sources, not just the LFSR. It previously reloaded
+    // the seed only, so REAL mode resumed from wherever the counter happened to
+    // be. That was harmless in isolation (a full BURST_LEN=256 burst wraps an
+    // 8-bit counter exactly back to 0, so complete bursts looked identical) but
+    // it made a *partial* burst leave the design in a state no host command
+    // could recover. Phase 1 copies this module, and there "restart the source"
+    // has to mean the capture buffer's read pointer -- so resync is defined here
+    // as reinitialising every data source, with no exceptions to remember.
     reg [7:0] real_data_stub = 8'h00;
     always @(posedge clk or negedge rst_n)
-        if (!rst_n) real_data_stub <= 8'h00;
+        if (!rst_n)                     real_data_stub <= 8'h00;
+        else if (do_resync)             real_data_stub <= 8'h00;
         else if (tx_fire && !mode_mock) real_data_stub <= real_data_stub + 8'h01;
 
     wire [7:0] tx_data = mode_mock ? mock_data : real_data_stub;

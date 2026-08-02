@@ -11,6 +11,8 @@
 //      the FPGA stream disagree with serial_selftest.py's reference model).
 //   3. The decoded byte stream matches that same reference model.
 //   4. The RX command channel works: 0xAA reaches the design (rx_ever latches).
+//   5. REAL mode streams its source from a defined start, and 0xAA restarts
+//      that source too -- not just the LFSR.
 //
 module tb_bringup_selftest;
     localparam integer CLK_HZ  = 27_000_000;
@@ -18,8 +20,10 @@ module tb_bringup_selftest;
     localparam integer HALF_PS = 500_000_000_000 / CLK_HZ; // 18518 ps
     localparam integer BIT_PS  = 1_000_000_000_000 / BAUD; // 8680555 ps
     localparam [7:0]   SEED    = 8'h01;
-    localparam [7:0]   CMD_RESYNC = 8'hAA;
+    localparam [7:0]   CMD_RESYNC     = 8'hAA;
+    localparam [7:0]   CMD_FORCE_REAL = 8'h52; // 'R'
     localparam integer NBYTES  = 64;
+    localparam integer BURST_LEN = 256; // must match bringup_selftest_top.v
 
     reg clk = 0;
     always #(HALF_PS) clk = ~clk;
@@ -52,6 +56,40 @@ module tb_bringup_selftest;
         if (dut.tx_ready && dut.tx_valid) byte_launches <= byte_launches + 1;
         if (dut.u_lfsr.en && !dut.u_lfsr.load_seed) lfsr_advances <= lfsr_advances + 1;
     end
+
+    // ---- check 5 instrumentation: what does real_data_stub hold immediately
+    // after a resync? A hierarchical peek is the only way to ask this precisely.
+    // do_resync is high for one cycle N; the RTL zeroes real_data_stub on the
+    // N->N+1 edge, so sampling one cycle behind do_resync reads the post-resync
+    // value. Without the fix this reads whatever the counter had reached
+    // (~NBYTES); with it, exactly 0.
+    reg       snoop_en  = 1'b0;
+    reg       resync_d  = 1'b0;
+    reg       resync_seen    = 1'b0;
+    reg [7:0] real_at_resync = 8'hFF;
+    always @(posedge clk) begin
+        resync_d <= dut.do_resync;
+        if (snoop_en && resync_d) begin
+            real_at_resync <= dut.real_data_stub;
+            resync_seen    <= 1'b1;
+        end
+    end
+
+    // A burst is BURST_LEN bytes with no meaningful inter-byte gap; the line
+    // going quiet for many bit times is how you know it has finished. Polling
+    // for sustained idle is more robust than counting remaining bytes, which
+    // would bake this testbench's framing assumptions in twice.
+    task wait_burst_done;
+        integer idle_bits;
+        begin
+            idle_bits = 0;
+            while (idle_bits < 20) begin
+                #(BIT_PS);
+                if (tx_line === 1'b1) idle_bits = idle_bits + 1;
+                else idle_bits = 0;
+            end
+        end
+    endtask
 
     // ---- behavioural UART receiver at the *expected* baud
     task rx_byte(output [7:0] b);
@@ -183,8 +221,63 @@ module tb_bringup_selftest;
             end
         end
 
+        // ---- check 5: REAL mode, and resync restarting its source.
+        // Drain the rest of the mock burst first -- the host protocol requires
+        // draining before the next command (see CLAUDE.md), so the testbench
+        // models a well-behaved host here rather than a racing one.
+        wait_burst_done();
+
+        // A mode byte selects the source for the *next* burst but does not arm
+        // one; 0xAA does. Same fork/join reason as above: arm the capture
+        // before the resync's stop bit finishes going out.
+        send_byte(CMD_FORCE_REAL);
+        fork
+            begin : capture_real
+                for (i = 0; i < NBYTES; i = i + 1) rx_byte(cap[i]);
+            end
+            begin : command_real
+                send_byte(CMD_RESYNC);
+            end
+        join
+
+        if (leds[1] !== 1'b1) begin
+            $display("FAIL: 0x52 did not leave MOCK mode (leds[1] still lit)");
+            errors = errors + 1;
+        end
+        for (i = 0; i < NBYTES; i = i + 1) begin
+            if (cap[i] !== i[7:0]) begin
+                $display("FAIL: REAL byte %0d mismatch: expected=0x%02x got=0x%02x (first 8 captured: %02x %02x %02x %02x %02x %02x %02x %02x)",
+                         i, i[7:0], cap[i],
+                         cap[0], cap[1], cap[2], cap[3], cap[4], cap[5], cap[6], cap[7]);
+                errors = errors + 1;
+                i = NBYTES;
+            end
+        end
+
+        // Resync mid-burst, with the counter demonstrably non-zero (NBYTES
+        // bytes have gone out). A complete 256-byte burst wraps an 8-bit
+        // counter back to 0 on its own, so only a partial burst can tell a
+        // real resync apart from doing nothing.
+        if (dut.real_data_stub === 8'h00) begin
+            $display("FAIL: testbench is not discriminating -- real_data_stub is already 0 before the mid-burst resync");
+            errors = errors + 1;
+        end
+        snoop_en = 1'b1;
+        send_byte(CMD_RESYNC);
+        repeat (20) @(posedge clk);
+        snoop_en = 1'b0;
+
+        if (!resync_seen) begin
+            $display("FAIL: mid-burst 0xAA never reached the design (do_resync never pulsed)");
+            errors = errors + 1;
+        end else if (real_at_resync !== 8'h00) begin
+            $display("FAIL: resync did not restart the REAL source: real_data_stub=0x%02x after 0xAA, expected 0x00",
+                     real_at_resync);
+            errors = errors + 1;
+        end
+
         if (errors == 0)
-            $display("PASS: bringup_selftest top-level, baud + LFSR cadence + command channel verified");
+            $display("PASS: bringup_selftest top-level, baud + LFSR cadence + command channel + mock/real resync verified");
         else
             $fatal(1, "FAIL: %0d error(s)", errors);
         $finish;

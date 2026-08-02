@@ -10,7 +10,7 @@ Verified by cross-referencing Sipeed's `TangNano-20K-example` repo `.cst` files 
 
 | Signal | Pin | Notes |
 |---|---|---|
-| `clk` | 4 | 27 MHz onboard oscillator |
+| `clk` | 4 | 27 MHz onboard oscillator. Function `LPLL1_T_in` — the left PLL's reference input, **not** a `GCLK_PIN`. See below |
 | `rst` | 88 | ⚠️ **`MODE0` config strap — do NOT use as a reset.** See below. Diagnostic only (`leds[4]`) |
 | `uart_rx` | 70 | onboard BL616 UART (`PIN70_SYS_RX`), host → FPGA |
 | `uart_tx` | 69 | onboard BL616 UART (`PIN69_SYS_TX`), FPGA → host |
@@ -53,6 +53,25 @@ for a dual-purpose name** (`MODE*`, `DONE`, `RECONFIG_N`, `READY`, `JTAGSEL_N`, 
 
 If a physical reset button is ever wanted, the second button on **pin 87** is the candidate —
 but verify it has no dual-purpose function first.
+
+### Pin 4 (the 27 MHz clock) is a PLL input, not a global-clock pin
+
+Same lesson, second instance — found by reading the same Function column. `impl/pnr/project.rpt.txt`
+lists pin 4's function as **`LPLL1_T_in`**: the dedicated reference input of the *left PLL*. The
+report also shows `GCLK_PIN 0/5` used, i.e. none of the five true global-clock pins are in play.
+
+Consequence: a design that ignores the PLL and drives logic straight from pin 4 gets its clock onto
+the PRIMARY global network via generic routing, and `gw_sh` says so:
+
+```
+WARN (PR1014) Generic routing resource will be used to clock signal 'clk_d' by the
+              specified constraint. And then it may lead to the excessive delay or skew
+```
+
+This is harmless for `bringup_selftest` (27 MHz, 205 MHz Fmax, 0 violated endpoints) and **should
+not be worked around** — the correct fix is to feed pin 4 into an `rPLL`, which is that pin's
+designed purpose. A PLL output reaches a global clock buffer natively. Phase 1 needs a PLL anyway
+for its oversampling capture clock, so the warning should clear as a side effect.
 
 Other reference points (not yet wired into any target):
 

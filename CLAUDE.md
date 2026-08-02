@@ -106,7 +106,16 @@ implementation. Full rationale in `docs/architecture.md`.
   (used as `rst` originally) is the device's `MODE0` configuration strap; the board's strapping
   overrides `PULL_MODE=UP`, so it reads low and held the entire design in reset for three
   sessions. `bringup_selftest` now uses an internal power-on reset. Look for `MODE*`, `DONE`,
-  `RECONFIG_N`, `READY`, `JTAGSEL_N` in `impl/pnr/project.rpt.txt`.
+  `RECONFIG_N`, `READY`, `JTAGSEL_N` in `impl/pnr/project.rpt.txt`. Second instance of the same
+  lesson: **pin 4 (the 27 MHz clock) is `LPLL1_T_in`**, the left PLL's reference input, not one of
+  the five `GCLK_PIN`s — so a design that bypasses the PLL reaches the global clock network through
+  generic routing (`WARN PR1014`). Fix by instantiating an `rPLL`, not by suppressing the warning.
+- **Every target needs a `.sdc` or no timing analysis runs at all.** `tools/build/gowin_build.sh`
+  auto-includes `src/targets/<target>/<target>.sdc` when present. Without one, `gw_sh` emits
+  `WARN (TA1132) 'clk' was determined to be a clock but was not created` and reports zero timing
+  violations — because it checked zero paths. A clean build log is not a timing signoff. With the
+  constraint, `bringup_selftest` reports 351 paths, 0 setup/0 hold violations, Fmax 205 MHz. Read
+  the numbers out of `impl/pnr/project_tr_content.html` (`project.tr.html` is only a frameset).
 - **Give every register a reset term, especially "is it alive?" indicators.** The heartbeat
   counter was the one register declared `always @(posedge clk)` with no reset, so `leds[0]` kept
   blinking while everything else sat in reset — making "the bitstream is alive" check true and
