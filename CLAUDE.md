@@ -71,13 +71,32 @@ Every phase's `<name>_top.v` instantiates both a mock pattern generator and the 
 path, muxed at **runtime** by a `mode` register (default = MOCK at reset/power-on), switchable
 via a UART command byte over the same command channel established in
 `bringup_selftest_top.v` (`0xAA` = resync, `0x4D` = 'M' = force mock, `0x52` = 'R' = force
-real). This is a single-bitstream, runtime-switchable pattern — NOT `` `ifdef ``-based build
+real). Note the TX side is **burst-on-demand, not free-running**: `0xAA` reloads the seed and
+arms exactly `BURST_LEN` (256) bytes, then the line goes idle. Free-running TX leaves a receiver
+no way to establish framing. Mode bytes select the source for the *next* burst but don't arm one
+— send the mode byte, then `0xAA`, and drain the full burst before the next command. This is a single-bitstream, runtime-switchable pattern — NOT `` `ifdef ``-based build
 variants — chosen specifically so an agent can flip between self-test and real-hardware modes
 without re-synthesizing or re-flashing. See `src/targets/bringup_selftest/` for the reference
 implementation. Full rationale in `docs/architecture.md`.
 
 ## Known gotchas
 
+- **Check the Gowin pin report's Function column before mapping any signal to a pin.** Pin 88
+  (used as `rst` originally) is the device's `MODE0` configuration strap; the board's strapping
+  overrides `PULL_MODE=UP`, so it reads low and held the entire design in reset for three
+  sessions. `bringup_selftest` now uses an internal power-on reset. Look for `MODE*`, `DONE`,
+  `RECONFIG_N`, `READY`, `JTAGSEL_N` in `impl/pnr/project.rpt.txt`.
+- **Give every register a reset term, especially "is it alive?" indicators.** The heartbeat
+  counter was the one register declared `always @(posedge clk)` with no reset, so `leds[0]` kept
+  blinking while everything else sat in reset — making "the bitstream is alive" check true and
+  useless at the same time. A liveness LED that cannot distinguish *configured* from *running* is
+  worse than no LED.
+- **`gw_sh` warnings are not cosmetic.** `WARN (EX3638) 'x' is already implicitly declared` means a
+  signal was used before its declaration, creating an implicit net. Gowin proceeds; iverilog
+  refuses. Grep the build log for `WARN` after each build.
+- **Every synthesizable target needs its own top-level testbench**, not just module-level ones.
+  `bringup_uart_loopback` tested `uart_tx` against `uart_rx` and passed while the top level had a
+  2x-LFSR-advance bug and unframeable free-running TX. See `sim/targets/bringup_selftest/`.
 - No board may be attached — `make sim`, `make build`, `make build-oss` all work without
   hardware; only `make flash*` / `make selftest-hw` need it.
 - LED polarity (`leds[5:0]`) is active-low per convention here; verify against actual behavior

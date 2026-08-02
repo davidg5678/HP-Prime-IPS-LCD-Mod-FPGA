@@ -56,7 +56,9 @@ if [ "$GW_EXIT" -eq 0 ] && [ -f "$EXPECTED_FS" ]; then
     echo "BUILD FAIL: $EXPECTED_FS exists but predates this build (stale artifact) — gw_sh likely failed silently; see $BUILD_DIR/${TARGET}_build.log"
     exit 1
   fi
-  cp "$EXPECTED_FS" "$BUILD_DIR/pnr/${TARGET}.fs"
+  # -f: gw_sh writes output files read-only, so a plain cp can't overwrite a
+  # destination left over from a previous build of this target.
+  cp -f "$EXPECTED_FS" "$BUILD_DIR/pnr/${TARGET}.fs"
   echo "BUILD PASS: bitstream at $BUILD_DIR/pnr/${TARGET}.fs"
   exit 0
 else

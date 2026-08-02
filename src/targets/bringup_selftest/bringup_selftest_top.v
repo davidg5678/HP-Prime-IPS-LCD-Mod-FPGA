@@ -1,17 +1,40 @@
 module bringup_selftest_top (
     input  wire       clk,      // pin 4, 27 MHz onboard oscillator
-    input  wire       rst,      // pin 88, reset button (active-low idle-high; verify polarity on first bring-up)
-    input  wire       uart_rx,  // pin 70, BL616 CDC-ACM bridge, host -> FPGA
-    output wire       uart_tx,  // pin 69, BL616 CDC-ACM bridge, FPGA -> host
+    input  wire       rst,      // pin 88, MODE0 config strap -- NOT in the reset path, diagnostic only (leds[4]); see below
+    input  wire       uart_rx,  // pin 71, temporary Arduino Uno bridge, host -> FPGA (was pin 70/BL616, see boards/tangnano20k/arduino_bridge.md)
+    output wire       uart_tx,  // pin 72, temporary Arduino Uno bridge, FPGA -> host (was pin 69/BL616, see boards/tangnano20k/arduino_bridge.md)
     output wire [5:0] leds      // pins 15-20, active-low
 );
-    localparam CLK_HZ = 27_000_000, BAUD = 1_000_000;
+    // BAUD must match FPGA_BAUD in arduino/fpga_uart_bridge/fpga_uart_bridge.ino.
+    // 38400, not 115200: the bridge's bit-banged SoftwareSerial receiver cannot
+    // sustain 115200 back-to-back (it drops ~1 byte in 116) -- the FPGA is not
+    // the bottleneck. See boards/tangnano20k/arduino_bridge.md.
+    localparam CLK_HZ = 27_000_000, BAUD = 38_400;
     localparam [7:0] SEED = 8'h01;
     localparam [7:0] CMD_RESYNC     = 8'hAA;
     localparam [7:0] CMD_FORCE_MOCK = 8'h4D; // 'M'
     localparam [7:0] CMD_FORCE_REAL = 8'h52; // 'R'
 
-    wire rst_n = rst;
+    // Power-on reset, deliberately NOT derived from the `rst` input pin.
+    //
+    // Confirmed: pin 88 carries this device's MODE0 configuration-strap
+    // function -- see the Function column for `rst` in impl/pnr/project.rpt.txt.
+    // Inferred: it therefore sits low regardless of PULL_MODE=UP, which held
+    // `rst_n` asserted and the entire design in reset. Driving reset from an
+    // internal POR instead took the design from transmitting nothing at all to
+    // a passing end-to-end self-test, which is what actually settles it.
+    // leds[4] exposes the raw pin level to confirm visually.
+    //
+    // What made this take so long to find: the heartbeat counter below is the
+    // ONE register in this module with no reset term, so leds[0] kept blinking
+    // the whole time and every "the bitstream is alive" check passed while the
+    // design was in fact held in reset. See PROGRESS.md 2026-08-02.
+    reg [15:0] por_cnt = 16'd0;
+    reg        rst_n   = 1'b0;
+    always @(posedge clk) begin
+        if (!por_cnt[15]) por_cnt <= por_cnt + 1'b1;
+        rst_n <= por_cnt[15]; // releases ~1.2ms after configuration
+    end
 
     wire [7:0] rx_data;
     wire       rx_valid;
@@ -37,10 +60,23 @@ module bringup_selftest_top (
         end
     end
 
+    // Declared before first use on purpose. Referencing tx_ready further down
+    // before declaring it created an implicit net; Gowin only warns about that
+    // (WARN EX3638 in impl/*_build.log) while iverilog rejects it outright,
+    // which is why this never had a top-level testbench. See PROGRESS.md.
+    wire tx_ready;
+    reg  tx_valid;
+
+    // A byte is handed to uart_tx only on the single cycle where it is both
+    // idle and being offered data. tx_ready on its own is high for TWO cycles
+    // per byte, which advanced the LFSR twice per transmitted byte and made the
+    // FPGA's stream disagree with serial_selftest.py's reference model.
+    wire tx_fire = tx_ready && tx_valid;
+
     wire [7:0] mock_data;
     lfsr8 #(.SEED(SEED)) u_lfsr (
         .clk(clk), .rst_n(rst_n),
-        .en(tx_ready && mode_mock), .load_seed(do_resync),
+        .en(tx_fire && mode_mock), .load_seed(do_resync),
         .value(mock_data)
     );
 
@@ -48,15 +84,34 @@ module bringup_selftest_top (
     reg [7:0] real_data_stub = 8'h00;
     always @(posedge clk or negedge rst_n)
         if (!rst_n) real_data_stub <= 8'h00;
-        else if (tx_ready && !mode_mock) real_data_stub <= real_data_stub + 8'h01;
+        else if (tx_fire && !mode_mock) real_data_stub <= real_data_stub + 8'h01;
 
     wire [7:0] tx_data = mode_mock ? mock_data : real_data_stub;
 
-    wire tx_ready;
-    reg  tx_valid;
+    // Burst-on-demand, NOT free-running. CMD_RESYNC reloads the LFSR seed and
+    // arms exactly BURST_LEN bytes; the line is idle otherwise. Streaming
+    // back-to-back forever (the old `tx_valid <= tx_ready`) was unusable for
+    // two independent reasons:
+    //   1. No inter-frame idle means a receiver has no way to establish
+    //      framing -- a data bit's falling edge looks exactly like a start
+    //      bit -- and serial_selftest.py's "first byte after resync == SEED"
+    //      raced against bytes already in flight.
+    //   2. It pins the Arduino bridge's SoftwareSerial receiver at 100% duty;
+    //      its bit-banged ISR runs with interrupts disabled for a whole byte
+    //      time, so a gap-free stream starves loop() and the hardware USART.
+    // BURST_LEN matches serial_selftest.py's default --count.
+    localparam [8:0] BURST_LEN = 9'd256;
+    reg [8:0] burst_left;
+    always @(posedge clk or negedge rst_n)
+        if (!rst_n)                          burst_left <= 9'd0;
+        else if (do_resync)                  burst_left <= BURST_LEN;
+        else if (tx_fire && burst_left != 0) burst_left <= burst_left - 9'd1;
+
+    wire burst_active = (burst_left != 9'd0);
+
     always @(posedge clk or negedge rst_n)
         if (!rst_n) tx_valid <= 1'b0;
-        else tx_valid <= tx_ready; // keep the pipe full
+        else tx_valid <= tx_ready && burst_active;
 
     uart_tx #(.CLK_HZ(CLK_HZ), .BAUD(BAUD)) u_tx (
         .clk(clk), .rst_n(rst_n),
@@ -70,10 +125,21 @@ module bringup_selftest_top (
     reg [7:0] tx_count = 0;
     always @(posedge clk or negedge rst_n)
         if (!rst_n) tx_count <= 0;
-        else if (tx_valid) tx_count <= tx_count + 1'b1;
+        else if (tx_fire) tx_count <= tx_count + 1'b1;
+
+    // Sticky, unambiguous bring-up diagnostic: latches on and stays on the
+    // instant a single valid UART byte is received, regardless of its
+    // content. Unlike leds[1] (mode), this needs no interpretation and
+    // isn't a snapshot of current state -- it only ever goes from off to on.
+    reg rx_ever = 1'b0;
+    always @(posedge clk or negedge rst_n)
+        if (!rst_n) rx_ever <= 1'b0;
+        else if (rx_valid) rx_ever <= 1'b1;
 
     assign leds[0]   = ~heartbeat[23]; // alive heartbeat
     assign leds[1]   = ~mode_mock;     // lit = MOCK mode active (default)
     assign leds[2]   = ~tx_count[7];   // toggles = data actively streaming
-    assign leds[5:3] = 3'b111;         // off, reserved for future status bits
+    assign leds[3]   = ~rx_ever;       // lit = FPGA has received >=1 valid UART byte since reset
+    assign leds[4]   = ~rst;           // DIAGNOSTIC: raw level of pin 88 (lit = pin reads HIGH)
+    assign leds[5]   = 1'b1;           // off, reserved for future status bits
 endmodule
