@@ -13,6 +13,9 @@ from a real capture on 2026-08-02 and the derivation is in PROGRESS.md.
     VSYNC           active low, 37.7 Hz
     data            changes on the DOTCLK FALLING edge, so it is stable across
                     the rising edge -- latch there
+    component order R, G, B -- confirmed with a red screen, which captured as
+                    320 px of ff 00 00 with the triplet phase already pinned
+                    independently by the greyscale captures
 
 Usage
     python3 python/tools/decode_prime.py --capture captures/x.json
@@ -176,15 +179,25 @@ def main():
         print(f"INFO: rejected {decode.rejected} of {decode.raw_edges} DOTCLK edges as "
               f"runts (< {MIN_EDGE_SPACING} samples apart) -- metastability from "
               f"oversampling an async clock only 8.1x")
-    bad = 0
+    # Correctness is 960 DOTCLKs -> 320 pixels, and nothing else.
+    #
+    # An earlier version also required R == G == B on every pixel and called
+    # anything else an error. That was over-fitting to the sample data: every
+    # capture up to that point happened to be of a greyscale screen, so
+    # "greyscale" got mistaken for "correct". The first genuinely coloured
+    # capture -- a red screen, 320 px of ff 00 00 -- was then reported as 320
+    # errors per line. The count is still shown because it IS informative (on
+    # known-greyscale content a nonzero value means the sampling point or the
+    # triplet phase is wrong) but it cannot be a pass criterion.
     for i, st in enumerate(stats):
         flag = ""
         if st["pixels"] != ACTIVE_PIXELS:
             flag += f"  <- expected {ACTIVE_PIXELS} pixels"
-            bad += 1
-        if st["mixed"]:
-            flag += f"  <- {st['mixed']} pixels with R!=G!=B"
-        print(f"  line {i}: {st['dotclks']:4d} DOTCLKs -> {st['pixels']:3d} px{flag}")
+        if st["dotclks"] != ACTIVE_PIXELS * BYTES_PER_PIXEL:
+            flag += f"  <- expected {ACTIVE_PIXELS * BYTES_PER_PIXEL} DOTCLKs"
+        kind = "greyscale" if st["mixed"] == 0 else f"{st['mixed']} coloured px"
+        print(f"  line {i}: {st['dotclks']:4d} DOTCLKs -> {st['pixels']:3d} px  "
+              f"[{kind}]{flag}")
 
     if args.runs:
         for i, line in enumerate(lines):
@@ -203,12 +216,15 @@ def main():
         w, h = write_ppm(args.ppm, lines)
         print(f"INFO: wrote {args.ppm} ({w}x{h})")
 
-    good = sum(1 for st in stats if st["pixels"] == ACTIVE_PIXELS and not st["mixed"])
-    if good == 0:
-        print(f"FAIL: no line decoded cleanly ({len(lines)} attempted)")
+    good = sum(1 for st in stats
+               if st["pixels"] == ACTIVE_PIXELS
+               and st["dotclks"] == ACTIVE_PIXELS * BYTES_PER_PIXEL)
+    if good != len(lines):
+        print(f"FAIL: {len(lines) - good} of {len(lines)} line(s) did not decode to "
+              f"{ACTIVE_PIXELS} pixels from {ACTIVE_PIXELS * BYTES_PER_PIXEL} DOTCLKs")
         return 1
     print(f"PASS: decoded {good}/{len(lines)} line(s) to {ACTIVE_PIXELS} pixels "
-          f"with consistent components, 0 errors")
+          f"({BYTES_PER_PIXEL} DOTCLKs each, R G B), 0 errors")
     return 0
 
 

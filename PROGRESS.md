@@ -3,6 +3,62 @@
 Update this file at the end of each work session so a future session (human or agent) can
 pick up cold. Newest entries at the top.
 
+## 2026-08-02 (part 8) — component order resolved: R, G, B. Protocol spec complete.
+
+**Status: the HP Prime's LCD protocol is fully specified.** A red screen captured as
+**320 px of `ff 00 00` on every line** — the first byte of each triplet is RED, so the component
+order is **R, G, B**.
+
+That is unambiguous because the triplet phase had already been pinned independently, from
+greyscale captures: 960 DOTCLKs per DE run dividing to exactly 320.00 pixels at sampling offset 0.
+With the phase fixed, the first byte after DE rises is the first component, and a saturated red
+screen puts 0xff there.
+
+### Complete measured protocol
+
+    320 x 240, serial RGB, 3 DOTCLKs per pixel, component order R G B
+    DOTCLK   13.289 MHz, 75.25 ns, ~53% duty; data changes on the FALLING edge,
+             latch on the RISING edge
+    line     102.435 us (9.762 kHz) = 1361 DOTCLKs: 960 active + 401 blanking
+    HSYNC    active low, ~1 DOTCLK wide
+    DE       active high, 72.25 us
+    VSYNC    active low, 37.7 Hz
+    blanking data bus driven to 0x00
+
+### The tool called a correct capture a failure
+
+`decode_prime.py` reported `FAIL: no line decoded cleanly` on the red screen — 320 errors per
+line — while printing the perfectly decoded `ff 00 00`. The pass criterion required
+`R == G == B` on every pixel.
+
+That was over-fitting to the sample data. Every capture up to that point happened to be of a
+greyscale screen, so "greyscale" got quietly promoted from *a property of what I had measured* to
+*the definition of correct*. The first genuinely coloured capture — exactly the one the check
+existed to enable — was then rejected by it.
+
+Fixed: correctness is now `960 DOTCLKs -> 320 pixels` and nothing else. The mixed-component count
+is still reported, because on **known-greyscale** content a nonzero value does indicate a wrong
+sampling point or triplet phase, but it can never be a pass criterion. Both captures now pass and
+the output labels each line `[greyscale]` or `[N coloured px]`.
+
+Worth remembering as a class of bug: an assertion derived from observed data rather than from the
+specification will reject the first input that differs from the sample — and it does so most
+confidently at exactly the moment the new input is the interesting one.
+
+### Fixtures
+
+`captures/` is gitignored (regenerable), but `prime_red.json` (uniform red) and
+`prime_live.json` (greyscale home screen) are a useful pair to keep locally: one exercises the
+coloured path, one the greyscale path, and they caught this bug between them.
+
+### Open
+
+- Capture depth is still 2.9 lines. The protocol is now fully known, so the remaining blocker for
+  Phase 2 (render a frame) is purely the **SDRAM controller** — the same piece Phase 4's frame
+  buffer needs. Nothing else about the Prime's side is unknown.
+- The one runt DOTCLK edge per capture is worked around host-side; synchronous capture would
+  remove it at the source and is the same RTL change that enables full-frame capture.
+
 ## 2026-08-02 (part 7) — FIRST REAL CAPTURE: the Prime's LCD bus is decoded
 
 **Status: probes connected, all 12 channels live, and the interface is fully characterised from
