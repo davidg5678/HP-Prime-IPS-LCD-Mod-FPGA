@@ -5,6 +5,10 @@
 > first rather than last. Each phase's "AI-development optimization" note below exists precisely
 > to keep the verification loop in simulation, where it is fast and fully observable.
 
+> **The bus is now fully characterised — see `docs/prime_lcd_protocol.md`.** Everything below
+> about "what is believed" was written before Phase 1 measured it. The hypothesis held: it is a
+> serial-RGB interface at 3 DOTCLKs per pixel.
+
 ## Background: what's being reverse-engineered
 
 The HP Prime calculator's LCD panel is believed to be driven by a serial-RGB-to-parallel-RGB
