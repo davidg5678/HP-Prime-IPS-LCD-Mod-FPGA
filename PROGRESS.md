@@ -3,7 +3,7 @@
 Update this file at the end of each work session so a future session (human or agent) can
 pick up cold. Newest entries at the top.
 
-## 2026-08-02 (part 8) — component order resolved: R, G, B. Protocol spec complete.
+## 2026-08-02 (part 8) — component order resolved: R, G, B (confirmed twice). Protocol spec complete.
 
 **Status: the HP Prime's LCD protocol is fully specified.** A red screen captured as
 **320 px of `ff 00 00` on every line** — the first byte of each triplet is RED, so the component
@@ -13,6 +13,24 @@ That is unambiguous because the triplet phase had already been pinned independen
 greyscale captures: 960 DOTCLKs per DE run dividing to exactly 320.00 pixels at sampling offset 0.
 With the phase fixed, the first byte after DE rises is the first component, and a saturated red
 screen puts 0xff there.
+
+**Confirmed a second time with a green screen: `00 ff 00` on all 320 px of all three lines.**
+Two independent single-colour captures, each isolating a different component:
+
+| Screen | Captured pixel | Implies |
+|---|---|---|
+| red | `ff 00 00` | component 0 = **R** |
+| green | `00 ff 00` | component 1 = **G** |
+| — | — | component 2 = **B**, by elimination over a 3-component pixel |
+
+A blue capture would be redundant. Both PPM outputs round-trip: 320x3, 960 px, every pixel exactly
+(255,0,0) and (0,255,0) respectively — so the decoder, the triplet grouping and the PPM writer are
+all confirmed end to end against known ground truth.
+
+Incidentally the green capture rejected **zero** runt DOTCLK edges where every previous capture
+rejected exactly one. That is consistent with the diagnosis — metastability is probabilistic, not
+a fixed defect — and is a small independent check that the runt filter is not simply discarding a
+real edge every time.
 
 ### Complete measured protocol
 
