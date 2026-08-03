@@ -75,6 +75,31 @@ module tb_la_capture;
 
     integer errors = 0;
 
+    // Free-running walking-1 driver for the channel-mapping check. Runs as its
+    // own process because a UART command byte takes 10 us while the whole
+    // capture window is 2.4 us -- the testbench cannot drive a pattern "after
+    // arming", the capture is long over by then. Cycling continuously instead
+    // guarantees the window contains a complete walk wherever it lands.
+    reg     walk_en = 1'b0;
+    integer wk;
+    always begin
+        if (walk_en) begin
+            for (wk = 0; wk < 12; wk = wk + 1) begin
+                probe = 12'd1 << wk;
+                // 80 ns per step => a 12-step cycle is 0.96 us. The capture
+                // window is 256 samples = 2.37 us, which is more than TWICE the
+                // cycle -- that is the condition for a complete walk to fall
+                // inside the window regardless of phase. At 140 ns the window
+                // was only 1.4 cycles and the check failed intermittently on
+                // phase alone. Still ~8.6 samples per step, far more than the
+                // synchroniser needs.
+                #80.0;
+            end
+        end else begin
+            #100.0;
+        end
+    end
+
     always #(CLK_NS/2.0) clk = ~clk;
 
     la_capture_top #(
@@ -547,6 +572,67 @@ module tb_la_capture;
                      r_count, r_trig, r_trig);
         end
 
+        // ---- 4b. channel mapping: every probe pin -> its own sample bit ---
+        // Nothing else in this file toggles sample bits 5..11. The MOCK pattern
+        // cannot: its frame is 32 px x 8 lines, so x <= 31 and y <= 7 and the
+        // top three data bits are always zero. Check 4 drives only bit 2. A
+        // transposition among the upper data channels would therefore pass
+        // every other test in this file and only show up as garbled pixels
+        // after twelve wires had been soldered to a calculator.
+        send_byte(CMD_RESET);
+        send_byte(CMD_REAL);
+        walk_en = 1'b1;
+        set_post(16'd255);
+        set_trigger(16'h0000, 16'h0000);   // trigger immediately
+        send_byte(CMD_ARM);
+        wait_full(20);
+        cmd_drain;
+
+        // Check the ORDER, not merely the presence, of each one-hot value.
+        // Presence alone is not discriminating: transposing two channels yields
+        // the same SET of values {1,2,4,...,2048}, and a mutation swapping
+        // probe[10] and probe[11] passed a presence-only check.
+        //
+        // Only ONE-HOT samples are considered. The walk changes two bits at
+        // once at every step and probe is asynchronous to the sample clock, so
+        // sync2 legitimately catches transient samples (both bits high, or
+        // both low) at the boundaries. Those are an artefact of the stimulus,
+        // not of the design, and filtering them is not the same as ignoring a
+        // failure -- a transposed channel still shows up as one-hot values in
+        // the wrong ORDER.
+        nd = 0;
+        for (i = 0; i < r_reply; i = i + 1) begin
+            if (samp[i] != 16'd0 && (samp[i] & (samp[i] - 16'd1)) == 16'd0) begin
+                if (nd == 0 || d_at[nd-1] !== samp[i]) begin
+                    d_at[nd] = samp[i];
+                    nd = nd + 1;
+                end
+            end
+        end
+
+        first_de = -1;
+        for (i = nd - 12; i >= 0; i = i - 1)
+            if (d_at[i] === 32'd1) first_de = i;
+        if (first_de < 0) begin
+            $display("FAIL: no complete walking-1 sequence in the capture (%0d one-hot values seen)", nd);
+            for (i = 0; i < nd; i = i + 1)
+                $display("        one-hot[%0d] = 0x%03x", i, d_at[i]);
+            errors = errors + 1;
+        end else begin
+            pre_ok = 1;
+            for (i = 0; i < 12; i = i + 1)
+                if (pre_ok && d_at[first_de + i] !== (32'd1 << i)) begin
+                    $display("FAIL: channel mapping wrong at step %0d: expected sample 0x%03x, got 0x%03x -- probe[%0d] does not land on sample bit %0d",
+                             i, (1 << i), d_at[first_de + i], i, i);
+                    errors = errors + 1;
+                    pre_ok = 0;
+                end
+            if (pre_ok)
+                $display("INFO: channel mapping verified -- all 12 probes land in their own sample bit, in order");
+        end
+        walk_en = 1'b0;
+        probe   = 12'h004;
+
         // ---- 5. EDGE vs LEVEL trigger ------------------------------------
         // The discriminating case, and the only one that distinguishes them: a
         // condition that is ALREADY TRUE at the instant the capture is armed.
@@ -606,7 +692,7 @@ module tb_la_capture;
 
         // ---- verdict ------------------------------------------------------
         if (errors == 0) begin
-            $display("PASS: la_capture top-level, baud + framing + MOCK pattern + windowed reads + pre-trigger history + EDGE/LEVEL trigger + abort verified");
+            $display("PASS: la_capture top-level, baud + framing + MOCK pattern + windowed reads + channel mapping + pre-trigger history + EDGE/LEVEL trigger + abort verified");
             $finish;
         end else begin
             $display("FAIL: %0d error(s)", errors);

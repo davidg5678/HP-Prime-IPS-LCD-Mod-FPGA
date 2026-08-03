@@ -238,6 +238,55 @@ def check_mock_pattern(samples):
     return errs
 
 
+def probe_report(samples):
+    """Per-channel activity summary of a capture.
+
+    The point of this is first-connection bring-up: with twelve fine wires
+    soldered to a calculator's flex, the question is never "what does the bus
+    say" before it is "is every wire actually on the pin I think it is". A
+    channel's frequency identifies it on its own -- DOTCLK, HSYNC and DE are
+    orders of magnitude apart -- so this turns a wiring check into one command.
+    """
+    n = len(samples)
+    if n < 2:
+        return ["capture too short to analyse"]
+    window_us = n * SAMPLE_NS / 1000.0
+    lines = [f"  window {window_us:.1f} us ({n} samples at {1000/SAMPLE_NS:.0f} MHz)",
+             "  ch  name    transitions   est. freq   %high  narrowest pulse  note"]
+    for bit, name in enumerate(CHANNELS):
+        seq = [(s >> bit) & 1 for s in samples]
+        trans = [i for i in range(1, n) if seq[i] != seq[i - 1]]
+        high = sum(seq)
+        pct = 100.0 * high / n
+        if not trans:
+            note = ("STATIC LOW - unconnected? (inputs are pulled down)"
+                    if seq[0] == 0 else "static high")
+            lines.append(f"  {bit:>2}  {name:<6} {0:>11}   {'-':>9}   {pct:5.1f}  "
+                         f"{'-':>15}  {note}")
+            continue
+        # Two transitions make one period.
+        freq_hz = (len(trans) / 2.0) / (n * SAMPLE_NS * 1e-9)
+        widths = [trans[i] - trans[i - 1] for i in range(1, len(trans))]
+        narrow = min(widths) * SAMPLE_NS if widths else 0.0
+        note = ""
+        if len(trans) < 4:
+            note = "too few edges for a reliable rate"
+        if narrow and narrow < 2 * SAMPLE_NS:
+            note = (note + "; " if note else "") + "pulses at the sample limit - aliasing"
+        lines.append(f"  {bit:>2}  {name:<6} {len(trans):>11}   "
+                     f"{_hz(freq_hz):>9}   {pct:5.1f}  "
+                     f"{narrow:>12.1f} ns  {note}")
+    return lines
+
+
+def _hz(f):
+    if f >= 1e6:
+        return f"{f/1e6:.2f} MHz"
+    if f >= 1e3:
+        return f"{f/1e3:.2f} kHz"
+    return f"{f:.1f} Hz"
+
+
 def write_vcd(path, samples, trig_index):
     """Write the capture as a VCD. Only emits a timestamp when something
     changed, so a 32768-sample capture of a slow bus stays small."""
@@ -293,6 +342,9 @@ def main() -> int:
     ap.add_argument("--post", type=int, default=None,
                     help="post-trigger samples (default: the design's own 3/4 of DEPTH)")
     ap.add_argument("--vcd", default=None, help="write the capture to this VCD file")
+    ap.add_argument("--probe-check", action="store_true",
+                    help="print a per-channel activity summary -- use this first after "
+                         "wiring, to confirm every probe is on the pin you think it is")
     ap.add_argument("--timeout", type=float, default=10.0,
                     help="seconds to wait for the capture to complete")
     args = ap.parse_args()
@@ -361,6 +413,14 @@ def main() -> int:
         write_vcd(args.vcd, samples, st.trig)
         print(f"INFO: wrote {args.vcd} ({len(samples)} samples, "
               f"{len(samples) * SAMPLE_NS / 1000.0:.1f} us, trigger at index {st.trig})")
+
+    if args.probe_check:
+        print("INFO: per-channel activity")
+        for line in probe_report(samples):
+            print(line)
+        print("INFO: expected from the scope survey -- DOTCLK ~13.1 MHz, HSYNC ~9.61 kHz,")
+        print("      DE ~9.8 kHz. VSYNC is 37.7 Hz (26.5 ms period), far longer than this")
+        print("      window, so it is EXPECTED to read static here; that is not a fault.")
 
     if args.real:
         # Nothing to check the physical bus against -- that is the whole point
