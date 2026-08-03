@@ -1,13 +1,15 @@
 # HP_PRIME_LCD — Claude Code Reference
 
-HP Prime calculator LCD reverse-engineering project on a Sipeed Tang Nano 20K.
-**The calculator's LCD bus is reverse-engineered and specified in
-`docs/prime_lcd_protocol.md`** — 320x240 serial RGB, 3 DOTCLKs per pixel, order R G B, all
-measured from hardware. Panel compatibility for Phases 3/4 is in `docs/panel_afy320240a0.md`.
+HP Prime calculator LCD reverse-engineering project on a Sipeed Tang Nano 20K
 (Gowin GW2AR-LV18QN88C8/I7). Four phases — see `docs/architecture.md`. This repo is currently
 in **Phase 1** (logic analyser); proto-phase-1, which bootstrapped the agentic dev loop, is
 complete and merged. See `PROGRESS.md` for current
 status before assuming anything below has actually been run/verified this session.
+
+**The calculator's LCD bus is reverse-engineered and fully specified in
+`docs/prime_lcd_protocol.md`** — 320×240, 8-bit serial RGB, 3 DOTCLKs per pixel, component order
+R G B, every figure measured from hardware. Panel compatibility for Phases 3/4 is in
+`docs/panel_afy320240a0.md`.
 
 ## Directory layout
 
