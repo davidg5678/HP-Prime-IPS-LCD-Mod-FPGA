@@ -3,6 +3,79 @@
 Update this file at the end of each work session so a future session (human or agent) can
 pick up cold. Newest entries at the top.
 
+## 2026-08-02 (part 7) — FIRST REAL CAPTURE: the Prime's LCD bus is decoded
+
+**Status: probes connected, all 12 channels live, and the interface is fully characterised from
+real silicon. `python3 python/tools/decode_prime.py --live` → `PASS: decoded 3/3 line(s) to 320
+pixels with consistent components, 0 errors`.** Bitstream is now in onboard flash, so the board
+self-configures on power-up.
+
+### Measured interface specification
+
+Every figure below is from a capture, not a datasheet or an inference:
+
+| Property | Measured |
+|---|---|
+| DOTCLK | **13.289 MHz**, period 75.25 ns, ~53 % duty |
+| Clocks per pixel | **3** — 960 DOTCLKs per DE run ÷ 320 = **exactly 320.00 pixels** |
+| Line period | **102.435 µs** (9.762 kHz), **1361 DOTCLKs**: 960 active + 401 blanking |
+| HSYNC | active low, **8 samples = 74 ns ≈ 1 DOTCLK** wide |
+| DE | active high, **72.25 µs** |
+| VSYNC | active low, 37.7 Hz — static within a 303 µs window, as predicted |
+| Data timing | changes 0–1 samples after the DOTCLK **falling** edge; **latch on the rising edge** |
+| Blanking | data bus driven to **0x00** (only 4 distinct values outside DE across 9358 samples) |
+| Content | greyscale in this capture: **R = G = B for every one of 320 px** on every clean line |
+
+The 3-clocks-per-pixel result confirms the ILI9322-family serial-RGB hypothesis
+`docs/architecture.md` has carried since the start. 960/320 came out to 320.00, not 319.6 — the
+kind of number that needs no interpretation.
+
+### Two decoding traps, both found by measurement rather than reasoning
+
+1. **Latching midway between DOTCLK rising edges is wrong.** It is the obvious choice and it lands
+   almost exactly on the falling edge at 53 % duty — precisely where the data changes. Sweeping
+   the sampling offset 0–7 samples against "how many pixels come out with R≠G≠B" gave 0 mixed
+   pixels at offsets 0–3 and tens at 4+. The failure mode is nasty: solid areas decode perfectly
+   and only pixels at colour boundaries corrupt, which reads as anti-aliasing rather than as a
+   bug. `SAMPLE_OFFSET = 0` — latch on the rising edge itself.
+
+2. **One spurious DOTCLK edge per capture corrupted a whole line.** Reproducibly, one line per
+   capture came out with 961 DOTCLKs instead of 960, and since pixels are triplets, every boundary
+   after it shifted by one byte. Cause: oversampling an asynchronous 13.29 MHz clock only 8.1×
+   means the 2-FF synchroniser occasionally resolves a metastable edge into a runt — 2 in 8064
+   half-periods measured ≤ 1 sample wide. `decode_prime.py` now rejects rising edges arriving less
+   than 4 samples apart, which is physically impossible for this clock. 3/3 lines clean afterwards.
+   **The real fix is synchronous capture** (sampling ON DOTCLK), which is also what full-frame
+   capture needs.
+
+### What a decoded line looks like
+
+Line 0 of a live capture, 320 px in 30 runs — the Prime's home screen:
+
+    52 px  ff ff ff      white margin
+   217 px  e1 e1 e1      grey field
+     ...   ec/44/1e/ca/48/0e/08/b0 ...   glyph pixels on white
+
+### New tooling
+
+- `python/tools/decode_prime.py` — decodes a capture (saved JSON or live) into pixels, reports
+  per-line DOTCLK and pixel counts, writes a dependency-free PPM, PASS/FAIL contract.
+- `python/tools/la_capture.py --probe-check` — per-channel transitions, frequency, duty and
+  narrowest pulse. This is what confirmed the wiring on first connection.
+
+### Open
+
+- **Component order (R,G,B vs B,G,R) is still undetermined**, because everything captured so far
+  is greyscale — R=G=B for every pixel, which cannot distinguish orderings. Resolving it needs a
+  screen with known, saturated colour on it. Concrete next step: put something strongly red on the
+  Prime's display and re-capture.
+- Capture depth is 2.9 lines. Enough for protocol work, not for an image. Full frames need the
+  SDRAM controller, which is also what Phase 4's frame buffer needs.
+- The one runt edge per capture is worked around host-side, not eliminated. Synchronous capture
+  would remove it at the source.
+- The WS2812 RGB LED lights because pin 79 is probe channel D4 — expected, cosmetic, does not load
+  the signal (its DIN is high-Z CMOS at 5 V). Documented in `la_capture.cst`.
+
 ## 2026-08-02 (part 6) — Phase 3/4 panel analysed: no adapter needed, but no passthrough either
 
 **Status: analysis only, no code change. Full write-up in `docs/panel_afy320240a0.md`; phase
