@@ -3,6 +3,87 @@
 Update this file at the end of each work session so a future session (human or agent) can
 pick up cold. Newest entries at the top.
 
+## 2026-08-02 (part 6) — Phase 3/4 panel analysed: no adapter needed, but no passthrough either
+
+**Status: analysis only, no code change. Full write-up in `docs/panel_afy320240a0.md`; phase
+roadmap in `docs/architecture.md` updated.** Panel is an Orient Display
+**AFY320240A0-3.5INTH-C2** (`docs/AFY320240A0-3.5INTH-C2-spec.pdf`), 3.5″, **320×240 — an exact
+resolution match for the HP Prime**, ST7272A driver, parallel RGB 24-bit, 3.3 V logic.
+
+### The adapter question: no adapter needed for video
+
+The panel's 40-pin 0.5 mm FPC matches the Tang Nano's `FPC-40-0.5mm` on **38 of 40 pins**, checked
+pin-by-pin against the schematic's DISPLAY sheet. Power, all 24 colour lines, DOTCLK, HSYNC,
+VSYNC, DE, DISP and the backlight all line up. The two that differ are both benign:
+
+- **Panel pin 36 (SDA) is tied to GND by the board** and **pin 35 (SCL) is NC.** Harmless, because
+  the panel specifies pin 3 (CS) as *"Ground"* and the board does exactly that — and per the
+  datasheet, *"command loading … is completed at the next rising edge of CS"*. With CS permanently
+  low no serial command can ever latch, so the SPI is disabled by design and the panel runs on
+  default registers. Grounded SDA cannot corrupt anything and the panel can never drive it.
+
+The board wires **RGB565**: R0–R2, G0–G1 and B0–B2 are grounded on the PCB. That is a property of
+the board, so full 24-bit colour is unreachable by *any* adapter, not just by omitting one.
+
+An adapter would only buy three optional things: control of DISP (see below), access to SCL/SDA to
+change default registers, and the capacitive touch panel — which is on a *separate* 6-pin FFC
+(I²C, ST1633I at 0x70) that the 40-pin connector does not carry at all. The board's pins 37–40 are
+wired for *resistive* touch, which this panel does not have.
+
+### The real finding: the Prime's timing is illegal for this panel
+
+| | HP Prime (measured) | Panel (datasheet) |
+|---|---|---|
+| DOTCLK | 13.1 MHz | 5 / **6** / 8 MHz |
+| Pixel rate | 4.37 MHz (if 3 clk/px) | 5–8 MHz |
+| Line period | **104.1 µs** | 55 / **60** / 65 µs |
+| Frame rate | **37.7 Hz** | ≈58–68 Hz |
+| Resolution | 320×240 | 320×240 ✅ |
+
+Every temporal figure is out of range; only the resolution matches. **Phase 4 cannot be a
+wire-through** — it must capture a frame, buffer it, and re-emit on independently generated
+panel-legal timing. That is exactly the "clock-domain crossing / rate-matching" risk
+`architecture.md` always named for Phase 4, now measured instead of anticipated.
+
+Output recipe derived from the timing table (back porches include the sync pulse width — the only
+reading under which the parts sum to the quoted totals):
+
+    Thbp 43 + Thdisp 320 + Thfp 8  = Th 371 DCLK   (typ 371 ✓)
+    Tvbp 12 + Tvdisp 240 + Tvfp 8  = Tv 260 lines  (typ 260 ✓)
+    at 6 MHz: line 61.8 us, frame 16.08 ms = 62.2 Hz
+
+Because the SPI is unreachable, the datasheet's *"necessary to keep Tvbp=12 and Thbp=43 in sync
+mode"* is a hard constraint, not a suggestion. DE mode avoids it entirely and is the lower-risk
+choice; the board wires all three of HSYNC/VSYNC/DE so SYNC-DE mode is available.
+
+### SDRAM is the next real building block, ahead of Phase 3 RTL
+
+Two independent requirements converge on it:
+
+- Phase 2 needs whole frames: 2.86 M samples at 108 MHz vs a 32768-sample BSRAM buffer.
+- Phase 4 needs a frame buffer: 320×240 RGB565 = **1.23 Mbit** vs **828 Kbit** of BSRAM, half of
+  which `la_capture` already uses.
+
+The board's 64 Mbit SIP SDRAM answers both. Fallback if it proves expensive: an 8 bpp or paletted
+frame buffer is 614 Kbit and does fit BSRAM.
+
+### Open items on the panel
+
+- **DISP (pin 31) is hard-tied to +3V3 by the board.** The power-on sequence wants `T1 ≥ 10 ms`
+  between the internal GRB reset and DISP going high; tied to the rail it rises *with* VDD, so the
+  requirement is very likely violated. Commodity boards do this routinely and it usually works —
+  but if the panel fails to initialise, this is the first suspect, and the fix needs a cut trace
+  or an interposer plus an FPGA pin. **Pin 52 is the one spare** and would serve.
+- **`T2 ≥ 250 ms` from display signal to backlight on** — the FPGA owns `LCD_BL` (pin 49), so
+  Phase 3 should hold the backlight off for 250 ms after the timing generator starts rather than
+  enabling it at reset. Free to implement, easy to forget.
+- **FPC contact orientation** — both are 40-pin 0.5 mm, but the contact side needs eyes on the
+  hardware. If they disagree the fix is a flipped FFC extension, not an adapter board.
+- **Backlight current** — panel wants 19.2 V at 40 mA, absolute max 50 mA. The board's boost
+  driver (U6, R31 = 5.6 Ω sense) is in the right region but was designed for Sipeed's own 4.3″
+  panel. Measure before running continuously; the datasheet is explicit that over-driving
+  shortens LED life.
+
 ## 2026-08-02 (part 5) — Prime flex identified from scope data; probe pins re-mapped around the LCD connector
 
 **Status: `la_capture` re-pinned, rebuilt, reflashed and re-verified on hardware

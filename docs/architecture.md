@@ -68,15 +68,33 @@ is the reference implementation; later phases copy this pattern rather than rein
   phases. Natural point to introduce cocotb, reusing this same Python decode model as the
   testbench oracle.
 
-- **Phase 3 — physical LCD driver.** Drives the RGB LCD header (pins documented in
-  `boards/tangnano20k/pinout.md`). Reuses the pattern-generator building block from Phase 1's
-  mock as a synthetic test-image source. **AI-development optimization**: timing-generator
-  correctness (sync pulse widths, porches) is fully checkable in simulation against numeric
-  spec before any physical panel is needed.
+- **Phase 3 — physical LCD driver.** Drives the onboard RGB LCD FPC connector (pins documented
+  in `boards/tangnano20k/pinout.md`). Panel is an Orient Display AFY320240A0-3.5INTH-C2, 320x240
+  — an exact resolution match for the Prime. Analysis in `docs/panel_afy320240a0.md`: **no
+  adapter board is needed**, the connectors match on 38 of 40 pins, and the board wires RGB565
+  (the low colour bits are grounded on the PCB, so 24-bit is unreachable by any adapter). Reuses
+  the pattern-generator building block from Phase 1's mock as a synthetic test-image source.
+  **AI-development optimization**: timing-generator correctness is fully checkable in simulation
+  against the datasheet's numeric spec before any physical panel is needed — the target is
+  Th = 371 DCLK, Tv = 260 lines at 6 MHz, and the panel's SPI is unreachable (CS is grounded), so
+  the default-register porch constraints Thbp=43 / Tvbp=12 are hard requirements in SYNC mode.
 
-- **Phase 4 — live passthrough.** Composes Phase 1's capture path directly into Phase 3's
-  driver path, reusing the same runtime mux/command-channel convention to select between
-  {mock→LCD}, {live HP Prime capture→LCD}, {live capture→USB as in Phase 1} — all in one
-  bitstream. Main new risk is clock-domain crossing / rate-matching between capture and drive
-  timing. **AI-development optimization**: unit-testable in isolation via a randomized
-  FIFO fill/drain testbench before ever combining with real video.
+- **Phase 4 — live passthrough.** Composes Phase 1's capture path into Phase 3's driver path,
+  reusing the same runtime mux/command-channel convention to select between {mock→LCD}, {live HP
+  Prime capture→LCD}, {live capture→USB as in Phase 1} — all in one bitstream.
+
+  **This cannot be a wire-through, and that is now measured rather than anticipated.** Every
+  temporal figure of the Prime's output is illegal for the panel: DOTCLK 13.1 MHz against a
+  5–8 MHz spec, line period 104.1 µs against 55–65 µs, frame rate 37.7 Hz against ~58–68 Hz. Only
+  the 320x240 resolution matches. Phase 4 must therefore capture a frame, buffer it, and re-emit
+  it on independently generated panel-legal timing. The "clock-domain crossing / rate-matching"
+  risk this phase always carried is exactly that. **AI-development optimization**: unit-testable
+  in isolation via a randomized FIFO fill/drain testbench before ever combining with real video.
+
+- **The SDRAM controller is the real next building block**, ahead of Phase 3 RTL. Two independent
+  requirements converge on it. A full frame of capture is 2.86 M samples at 108 MHz against a
+  32768-sample BSRAM buffer (Phase 2 needs whole frames to render images). A 320x240 RGB565 frame
+  buffer is 1.23 Mbit against 828 Kbit of BSRAM, of which `la_capture` already uses half (Phase 4
+  needs one to retime). The board's 64 Mbit SIP SDRAM answers both; nothing else does. An 8 bpp
+  or paletted frame buffer (614 Kbit) would fit BSRAM and is the fallback if SDRAM proves
+  expensive.
