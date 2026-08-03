@@ -1,0 +1,5 @@
+src/common/uart_tx.v
+src/common/uart_rx.v
+src/common/pll_27_108.v
+src/common/sdram_ctrl.v
+src/targets/sdram_selftest/sdram_selftest_top.v

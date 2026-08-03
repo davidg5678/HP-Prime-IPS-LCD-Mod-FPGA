@@ -3,6 +3,81 @@
 Update this file at the end of each work session so a future session (human or agent) can
 pick up cold. Newest entries at the top.
 
+## 2026-08-03 — SDRAM WORKING: 8 MB written and verified on hardware
+
+**Status: `make sdram-hw` → `PASS: SDRAM self-test, 2,097,152 words (8 MB) written and verified,
+0 errors`, 5/5 consecutive runs, 0.52 s per full pass (30.7 MB/s including read-back). All five
+simulations and all three bitstreams still pass.**
+
+New: `sim/models/sdram_sim.v`, `src/common/sdram_ctrl.v`, `src/targets/sdram_selftest/`,
+`sim/targets/{sdram_ctrl,sdram_selftest}/`, `python/tools/sdram_selftest.py`, `make sdram-hw`.
+
+### The clock phase worked first time
+
+`docs/sdram.md` flagged the `O_sdram_clk` phase offset as the most likely cause of "simulates
+perfectly, reads garbage from silicon". Driving the die on `~clk` — half a cycle for every
+registered output to settle before the die samples it — was right on the first attempt. Recording
+that because the prediction was reasonable and simply did not come true; the risk was real, the
+mitigation happened to be sufficient.
+
+### The strict model earned its place immediately
+
+Gowin ships no SDRAM simulation model ("please contact Micron Technology"), so
+`sim/models/sdram_sim.v` had to be written anyway. It was built to *check* the protocol rather
+than merely respond to it, and it caught a real bug on its very first run:
+
+**Auto-precharge was on the wrong bit.** `{2'b00, 1'b1, a_col}` puts the flag on A8, which on a
+256-column part is inside the column field. A10 is the top bit of the 11-bit address. The bank
+therefore never closed, and the model said so precisely — `ACTIVATE on a bank that is already
+active` — instead of the silent data corruption a real die would have produced.
+
+Four mutations confirm the model discriminates, each with a diagnostic naming the actual fault:
+
+| Mutation | Caught as |
+|---|---|
+| drop auto-precharge (A10 low) | `ACTIVATE on a bank that is already active` |
+| never refresh in steady state | `refresh interval exceeded -- no AUTO REFRESH within tREFI` |
+| issue READ/WRITE one cycle early | `READ/WRITE violates tRCD` |
+| sample read data one cycle early | readback returns `0xzzzzzzzz` |
+
+### A handshake race the unit test could not have found
+
+The integration testbench deadlocked at word 22. Cause: `ready` was **registered**, so a requester
+sees it a cycle late — and if a refresh falls due in that gap the controller takes the refresh
+branch and the one-cycle `req` pulse is silently dropped. A dropped write skips a word; a dropped
+read hangs forever waiting for `rvalid`.
+
+`ready` is now combinational and means *"a request presented on this cycle will be accepted"*, and
+the requester holds `req` until it observes `req && ready`. That is the only unambiguous transfer
+point.
+
+Worth noting how close this came to escaping: the unit-level testbench has the same latent race
+and **passes either way**, because ~400 accesses rarely collide with a 15 µs refresh. On hardware,
+with 4.2 million accesses per run, it would have been certain — and would have presented as "the
+SDRAM hangs sometimes".
+
+### Numbers
+
+- Gowin signoff: 2537 paths, 0 setup / 0 hold violations.
+- Resources: 602/20736 logic (3%), 447 registers (3%), **9/66 package I/O**.
+- **All 55 SDRAM ports bonded to internal `p` pads; zero on package pins** — confirmed from the
+  placed design, exactly as `docs/sdram.md` predicted.
+- Measured 30.7 MB/s for a write pass plus a read-back pass over the whole 8 MB. Against the
+  Prime's 8.69 MB/s that is comfortable, and it is a single-word controller with no bursts.
+
+### Open
+
+- **Single-word accesses only.** Every access pays a row activation: ~10 cycles per word. Burst
+  mode and an open-row policy are the obvious next gains, and should be measured against this
+  working baseline rather than assumed.
+- The address map is `{bank, row, col}`. `{row, bank, col}` would let consecutive pages land in
+  different banks so the next row could be activated while the current one still streams — worth
+  doing only if burst mode needs the bandwidth.
+- Timing constants are conservative standard SDR values, not part-specific; the data sheet defers
+  its AC table to IPUG279, which is not installed. First place to look if throughput ever matters.
+- Not yet wired to anything. Phase 2 (whole-frame capture) and Phase 4 (frame buffer) are the
+  consumers.
+
 ## 2026-08-02 (part 8) — component order resolved: R, G, B (confirmed twice). Protocol spec complete.
 
 **Status: the HP Prime's LCD protocol is fully specified.** A red screen captured as

@@ -1,0 +1,3 @@
+sim/models/sdram_sim.v
+src/common/sdram_ctrl.v
+sim/targets/sdram_ctrl/tb_sdram_ctrl.v

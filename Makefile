@@ -2,7 +2,7 @@ SIM_TARGET   ?= bringup_uart_loopback
 BUILD_TARGET ?= bringup_selftest
 VCD          ?=
 
-.PHONY: sim build build-oss flash flash-sram selftest-hw capture-hw check-env clean
+.PHONY: sim build build-oss flash flash-sram selftest-hw capture-hw sdram-hw check-env clean
 
 sim:          ; tools/sim/run_sim.sh $(SIM_TARGET)
 build:        ; tools/build/gowin_build.sh $(BUILD_TARGET)
@@ -14,5 +14,8 @@ selftest-hw:  ; python3 python/tools/serial_selftest.py $(if $(PORT),--port $(PO
 # buffer and verifies the synthetic video pattern. Needs `make flash-sram
 # BUILD_TARGET=la_capture` first. VCD=<path> also writes a waveform.
 capture-hw:   ; python3 python/tools/la_capture.py $(if $(PORT),--port $(PORT)) $(if $(VCD),--vcd $(VCD))
+# Full-memory SDRAM test: writes and reads back all 8 MB of the in-package die.
+# Needs `make flash-sram BUILD_TARGET=sdram_selftest` first.
+sdram-hw:     ; python3 python/tools/sdram_selftest.py $(if $(PORT),--port $(PORT))
 check-env:    ; tools/setup/check_env.sh
 clean:        ; rm -rf impl build_oss sim/.build
