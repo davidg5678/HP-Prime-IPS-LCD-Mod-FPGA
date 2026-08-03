@@ -1,0 +1,103 @@
+// Pin constraints for la_capture (Phase 1 logic analyser).
+//
+// Every pin below was checked against the Function column of the Gowin pin
+// report AND against the Sipeed schematic in docs/, because this repo has
+// already paid twice for not doing that: pin 88 is MODE0 (held the whole
+// design in reset for three sessions) and pin 4 is LPLL1_T_in rather than a
+// GCLK_PIN. A third trap was found while choosing these pins and is recorded
+// in boards/tangnano20k/pinout.md: pin 87 is MODE1, and pins 13/75/76/86 wire
+// to the BL616 as SPI_SCLK/MISO/MOSI/DIR, so driving them externally would
+// contend with the debug MCU exactly as pins 69/70 would.
+//
+// Bank voltage: the Gowin report lists banks 0/4/5 as LVCMOS18 with
+// BankVccio 1.8, which is the tool's default for a bank holding no assigned
+// I/O -- NOT the board. The POWER sheet of the schematic shows VCCO_4 and
+// VCCO_5 fed by ME6211C33 (3.3 V LDOs), and the datasheet pinout legend marks
+// every bank V_IO = 3.3 V. All twelve probes are therefore LVCMOS33.
+
+IO_LOC "clk" 4;
+IO_PORT "clk" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+// Onboard BL616 UART. Unchanged from proto-phase-1: verified working at
+// 1 Mbaud, hard-wired to the BL616 with no jumper, so never drive externally.
+IO_LOC "uart_rx" 70;
+IO_PORT "uart_rx" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+IO_LOC "uart_tx" 69;
+IO_PORT "uart_tx" IO_TYPE=LVCMOS33 DRIVE=8;
+
+// ---------------------------------------------------------------- probes
+//
+// All twelve are on the 2x20 0.1" headers and carry no onboard component
+// beyond the unpopulated 40-pin LCD FPC connector, so nothing contends with a
+// signal under test. PULL_MODE=DOWN so that an UNCONNECTED channel reads a
+// steady 0 rather than floating -- a floating logic-analyser input produces
+// convincing-looking noise, which is the worst possible failure mode for a
+// tool whose entire job is telling you what a wire did.
+//
+// probe[0] is DOTCLK, the fastest signal, and sits on pin 77 = GCLKT_1, the
+// only global-clock-capable pin left on the headers after the BL616 SPI pins
+// are excluded. Nothing in this design clocks off it, but a future
+// synchronous-capture mode (sample on DOTCLK rather than oversampling) would
+// need exactly that, and pin assignments are the expensive thing to change
+// once probe wires are soldered to a calculator.
+//
+// Physical note for whoever wires this up: pins 27/28/25/26/29/30/31 are seven
+// CONSECUTIVE positions on the left header, in that order -- 25 and 26 sit
+// between 28 and 29, which is not the order the numbers suggest. See the
+// pinout table in boards/tangnano20k/pinout.md.
+
+IO_LOC "probe[0]" 77;    // DOTCLK  (board net LCD_CK,  GCLKT_1)
+IO_PORT "probe[0]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+
+IO_LOC "probe[1]" 25;    // HSYNC   (board net LCD_HS)
+IO_PORT "probe[1]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+
+IO_LOC "probe[2]" 26;    // VSYNC   (board net LCD_VS)
+IO_PORT "probe[2]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+
+IO_LOC "probe[3]" 48;    // DE      (board net LCD_DE)
+IO_PORT "probe[3]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+
+IO_LOC "probe[4]" 27;    // D0      (board net LCD_B7)
+IO_PORT "probe[4]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+
+IO_LOC "probe[5]" 28;    // D1      (board net LCD_B6)
+IO_PORT "probe[5]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+
+IO_LOC "probe[6]" 29;    // D2      (board net LCD_B5)
+IO_PORT "probe[6]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+
+IO_LOC "probe[7]" 30;    // D3      (board net LCD_B4)
+IO_PORT "probe[7]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+
+IO_LOC "probe[8]" 31;    // D4      (board net LCD_B3)
+IO_PORT "probe[8]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+
+IO_LOC "probe[9]" 71;    // D5      (board net HSPI_D0, header only)
+IO_PORT "probe[9]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+
+IO_LOC "probe[10]" 72;   // D6      (board net HSPI_D1, header only)
+IO_PORT "probe[10]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+
+IO_LOC "probe[11]" 73;   // D7      (board net HSPI_D2, header only)
+IO_PORT "probe[11]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+
+// ------------------------------------------------------------------ LEDs
+IO_LOC "leds[0]" 15;
+IO_PORT "leds[0]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+
+IO_LOC "leds[1]" 16;
+IO_PORT "leds[1]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+
+IO_LOC "leds[2]" 17;
+IO_PORT "leds[2]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+
+IO_LOC "leds[3]" 18;
+IO_PORT "leds[3]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+
+IO_LOC "leds[4]" 19;
+IO_PORT "leds[4]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+
+IO_LOC "leds[5]" 20;
+IO_PORT "leds[5]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;

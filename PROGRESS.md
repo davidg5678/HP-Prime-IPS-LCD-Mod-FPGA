@@ -3,6 +3,131 @@
 Update this file at the end of each work session so a future session (human or agent) can
 pick up cold. Newest entries at the top.
 
+## 2026-08-02 (part 4) — PHASE 1: logic analyser capturing, triggering and draining on hardware
+
+**Status: Phase 1 RTL complete and verified on the board. `make capture-hw` →
+`PASS: la_capture mock capture, 24577 samples verified (DOTCLK period, HSYNC period, DE width,
+RGB pattern), 0 errors`. All three simulations, both build paths, both bitstreams, and
+proto-phase-1's own hardware self-test still pass. New target `la_capture`: 12 channels at
+108 MHz into 32768 samples of BSRAM, mask/value trigger with selectable EDGE or LEVEL semantics,
+pre-trigger history, and a windowed drain over the same 1 Mbaud BL616 link.**
+
+Also merged proto-phase-1 to `main` (`96c1d35`) at the start of this session and re-verified it on
+hardware: `make selftest-hw` 5/5, and a throwaway check confirmed `187cc10`'s CMD_RESYNC fix on
+real silicon for the first time (mid-burst resync at 108 bytes in restarts the REAL counter at
+0x00 — previously only simulated).
+
+### What was built
+
+| File | Role |
+|---|---|
+| `src/common/pll_27_108.v` | `rPLL` wrapper, 27 → 108 MHz |
+| `sim/models/rPLL.v` | behavioural model of the Gowin primitive, sim-only, measures its input rather than parsing `FCLKIN` |
+| `src/common/sync2.v` | N-bit 2-FF synchroniser |
+| `src/common/video_timing_gen.v` | synthetic serial-RGB source (MOCK), R=x G=y B=x^y |
+| `src/common/capture_engine.v` | circular BSRAM capture, trigger, pre/post-trigger, read port |
+| `src/targets/la_capture/` | top level, `.cst`, `.sdc` |
+| `sim/targets/la_capture/` | top-level testbench, 6 checks |
+| `python/tools/la_capture.py` | host driver: arm, trigger, chunked drain, pattern verify, VCD out |
+
+**108 MHz was chosen for two reasons that both had to hold:** `27 × 4` exactly, and
+`108 / 1 = DIV 108` exactly for 1 Mbaud. That keeps the entire design in one clock domain — the
+probe pins are the only CDC — and preserves the zero-division-error property that made 1 Mbaud
+work at 27 MHz. Measured on the wire in simulation: 999,920 baud.
+
+### Four bugs the process caught that the tests as first written did not
+
+1. **Dead trigger logic, found by mutation testing.** Deleting the `!match_d` term from the
+   trigger made *no test fail*. With `match_d` cleared at arm, "edge-sensitive" and
+   "level-sensitive" are provably identical — the comment described behaviour the code did not
+   have. Fixed by making the distinction real and selectable (`'E'`/`'L'`): LEVEL seeds `match_d`
+   to 0, EDGE seeds it with the arm-time match so an already-true condition does not fire. This
+   matters for the actual job — "capture the next VSYNC falling edge" returns the wrong frame if
+   VSYNC happens to be low when the host arms. **Mutation-test a testbench before trusting it.**
+
+2. **`BUILD PASS` on a design that violated timing.** After adding the windowed read, the clamp
+   arithmetic became the critical path: Fmax 96.8 MHz against a 108 MHz constraint, 15 violated
+   setup endpoints — and `gw_sh` exited 0, wrote a bitstream, and the hardware test *passed* at
+   room temperature. Fixed twice over: the clamp is now pipelined across three cycles (nothing
+   needs it for ~870 clocks), and `tools/build/gowin_build.sh` now parses
+   `impl/pnr/project_tr_content.html` and fails the build on any setup/hold violation, a missing
+   timing report, or an analysis covering 0 paths. Adding an `.sdc` (part 3) made the analysis
+   *run*; this makes the result *matter*.
+
+3. **No flow control on the drain.** Streaming the full 64 KB buffer at 1 Mbaud loses bytes: four
+   consecutive full drains came up 263–1904 bytes short, non-deterministically, because nothing
+   stops the FPGA transmitting while the host's driver buffer is full. Reading faster only narrows
+   the window. Fixed with a windowed read command (`'G'` + start + count) so the host bounds what
+   is in flight; it now fetches in 4096-sample chunks. Header gained a `reply_count` field
+   (version 2, 10 bytes) so a clamped request cannot silently desync the stream.
+
+4. **A truncated DE run, found only on hardware.** A capture starts at an arbitrary point in the
+   frame, so the first DE run is partial by construction. The host checker flagged
+   `DE run of 25 DOTCLKs, expected 96`. The testbench had the same latent flaw and passed by luck.
+   Both now only check runs whose rising edge is inside the capture.
+
+### Toolchain divergence, in three different directions in one session
+
+`CLAUDE.md` already recorded that `WARN (EX3638)` (implicit net) is a Gowin *warning* and an
+iverilog *hard error*. This session found the other two directions:
+
+- `ERROR (EX2000)` — a reg driven from two `always` blocks — is a Gowin **hard error** that
+  iverilog simulates without complaint.
+- `ERROR: Multiple edge sensitive events found` — collapsing an async reset and a sync restart
+  into `if (!rst_n || restart)` — is a **yosys** hard error that both Gowin and iverilog accepted.
+  The first branch of an `always @(posedge clk or negedge rst_n)` block must test the asynchronous
+  signal alone; OR-ing a synchronous condition in describes hardware that does not exist.
+
+Passing any one toolchain is not evidence the RTL is well formed. `make build-oss` was documented
+as an optional second opinion; on this evidence it is closer to mandatory. New RTL uses
+`` `default_nettype none ``, which makes the implicit-net class an error in both tools.
+
+### Board findings (from the schematic and datasheet PDFs now in `docs/`)
+
+- **Pin 87 is `MODE1`** — the previous entry proposed it as the reset-button candidate "pending
+  verification". Verified: it is the other half of pin 88's strap pair. This board has no safe
+  external reset pin.
+- **Pins 13, 75, 76, 86 wire to the BL616** as `SPI_SCLK/MISO/MOSI/DIR` — same hazard as pins
+  69/70. Pins 71–74 (`HSPI_D0..D3`) reach only the headers despite the naming, and are safe.
+- **The Gowin report's bank voltages are a tool default, not the board.** It lists pins 25–42 and
+  79–86 as `LVCMOS18`; the POWER sheet shows every `VCCO` fed by a 3.3 V LDO and the datasheet
+  legend marks all banks 3.3 V. Trusting the report would have ruled out the best contiguous probe
+  run for no reason.
+- Probe pins chosen, all 3.3 V, all header-accessible, none loaded by an onboard component: 77
+  (DOTCLK, `GCLKT_1`), 25, 26, 48, 27–31, 71–73. Full table in `boards/tangnano20k/pinout.md`.
+
+### `PR1014` — the earlier prediction was wrong
+
+Part 3 predicted the `rPLL` would clear `WARN (PR1014)`. It does not. What it fixes is real: the
+Global Clock Signals table now shows the 108 MHz `clk_s` on `PRIMARY` across all four quadrants,
+where before the system clock reached logic through generic routing. But the warning persists,
+now naming `clk_d` — the 27 MHz reference hop from pin 4 into the adjacent PLL, a net with one
+load and no registers in its domain. Corrected in `pinout.md`, `CLAUDE.md` and the RTL comment.
+
+### Numbers
+
+- Gowin signoff: **4357 paths, 0 setup / 0 hold violations, Fmax 160.8 MHz** against 108 MHz.
+- Resources: 847/20736 logic (5%), 493 registers (4%), **24/46 BSRAM** (53%, inferred as `SDPB`),
+  21/66 I/O, 1/2 rPLL.
+- Open-source path independently: `OSS BUILD PASS`, nextpnr estimates 114 MHz for `clk_s`.
+- Capture: 32768 samples × 16 bits = 303 µs at 9.26 ns resolution.
+
+### Open
+
+- **The HP Prime's LCD interface voltage is unknown and blocks real probing.** These inputs are
+  3.3 V LVCMOS (V_IH ≈ 2.0 V); if the Prime's bus is 1.8 V it will not register and a level
+  shifter is needed. Measure before connecting anything. Nothing else in Phase 1 depends on this —
+  the whole path is validated in MOCK.
+- `oss_cad_build.sh` still passes nextpnr a 12 MHz target frequency rather than the real
+  constraint, so its "PASS at 12.00 MHz" line means less than it looks. Gowin is the signoff path,
+  but this should be wired to the `.sdc` value.
+- Verilator lint noise (~88 warnings, mostly `PROCASSINIT`/`WIDTHTRUNC`/`ZERODLY` from the rPLL
+  model) is high enough to hide a real warning. Unchanged from part 3, now worse.
+- `leds[4]` on `bringup_selftest` (raw pin 88 level) still never read visually. `la_capture` does
+  not use pin 88 at all.
+- No pre-trigger *depth* control: `post_len` is settable, but the split between pre and post is
+  implied by it rather than requested directly. Fine in practice.
+
 ## 2026-08-02 (part 3) — proto-phase-1 leftovers closed: timing constraints, deterministic resync
 
 **Status: proto-phase-1 CLOSED. Both testbenches pass (`PASS: uart_tx/uart_rx loopback, 34 bytes`

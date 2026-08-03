@@ -56,9 +56,60 @@ if [ "$GW_EXIT" -eq 0 ] && [ -f "$EXPECTED_FS" ]; then
     echo "BUILD FAIL: $EXPECTED_FS exists but predates this build (stale artifact) — gw_sh likely failed silently; see $BUILD_DIR/${TARGET}_build.log"
     exit 1
   fi
+  # Timing signoff is part of "did the build pass", not a separate thing to
+  # remember to look at. gw_sh exits 0 on a design with violated setup paths and
+  # happily writes a bitstream; that bitstream then works at room temperature
+  # and fails somewhere colder or hotter. This was not hypothetical -- an
+  # la_capture build shipped 15 setup-violated endpoints at Fmax 96.8 MHz
+  # against a 108 MHz constraint, printed BUILD PASS, and passed its hardware
+  # test anyway. Adding <target>.sdc made the ANALYSIS run; this makes the
+  # RESULT gate the build.
+  TR="$BUILD_DIR/pnr/project_tr_content.html"
+  TIMING=$(python3 - "$TR" <<'PYEOF' 2>/dev/null
+import html, re, sys
+try:
+    t = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+except OSError:
+    print("NOREPORT 0 0 0"); raise SystemExit
+t = re.sub(r"<[^>]+>", "|", t)
+t = re.sub(r"\s+", " ", html.unescape(t))
+def num(label):
+    # Cells render as "Numbers of Paths Analyzed| |4191" once tags become '|',
+    # so the separator run between label and value mixes bars and spaces.
+    m = re.search(re.escape(label) + r"[\s|]*(\d+)", t)
+    return int(m.group(1)) if m else -1
+paths = num("Numbers of Paths Analyzed")
+setup = num("Numbers of Setup Violated Endpoints")
+hold  = num("Numbers of Hold Violated Endpoints")
+print("OK" if paths >= 0 else "NOREPORT", paths, setup, hold)
+PYEOF
+)
+  set -- $TIMING
+  TR_STATE="${1:-NOREPORT}"; TR_PATHS="${2:--1}"; TR_SETUP="${3:--1}"; TR_HOLD="${4:--1}"
+
+  if [ "$TR_STATE" != "OK" ] || [ "$TR_PATHS" -lt 0 ]; then
+    echo "BUILD FAIL: no timing report parsed from $TR."
+    echo "  Every target needs src/targets/$TARGET/$TARGET.sdc -- without one gw_sh"
+    echo "  runs no static timing analysis at all and reports zero violations"
+    echo "  because it checked zero paths. See docs/verification.md."
+    exit 1
+  fi
+  if [ "$TR_PATHS" -eq 0 ]; then
+    echo "BUILD FAIL: timing analysis covered 0 paths -- the clock constraint in"
+    echo "  $SDC is not matching anything. A clean report over no paths is not a signoff."
+    exit 1
+  fi
+  if [ "$TR_SETUP" -ne 0 ] || [ "$TR_HOLD" -ne 0 ]; then
+    echo "BUILD FAIL: timing violated -- $TR_SETUP setup and $TR_HOLD hold endpoint(s)"
+    echo "  over $TR_PATHS analysed paths. Worst paths are in the Setup Paths Table of"
+    echo "  $TR (project.tr.html is only a frameset)."
+    exit 1
+  fi
+
   # -f: gw_sh writes output files read-only, so a plain cp can't overwrite a
   # destination left over from a previous build of this target.
   cp -f "$EXPECTED_FS" "$BUILD_DIR/pnr/${TARGET}.fs"
+  echo "TIMING PASS: $TR_PATHS paths analysed, 0 setup / 0 hold violations"
   echo "BUILD PASS: bitstream at $BUILD_DIR/pnr/${TARGET}.fs"
   exit 0
 else

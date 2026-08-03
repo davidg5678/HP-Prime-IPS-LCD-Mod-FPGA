@@ -2,7 +2,8 @@
 
 HP Prime calculator LCD reverse-engineering project on a Sipeed Tang Nano 20K
 (Gowin GW2AR-LV18QN88C8/I7). Four phases — see `docs/architecture.md`. This repo is currently
-in **proto-phase-1**: bootstrapping the agentic dev loop itself. See `PROGRESS.md` for current
+in **Phase 1** (logic analyser); proto-phase-1, which bootstrapped the agentic dev loop, is
+complete and merged. See `PROGRESS.md` for current
 status before assuming anything below has actually been run/verified this session.
 
 ## Directory layout
@@ -26,6 +27,7 @@ editing.
 |---|---|
 | Environment self-check | `make check-env` |
 | Simulate (default target `bringup_uart_loopback`) | `make sim` or `make sim SIM_TARGET=<name>` |
+| Phase 1 capture over USB serial | `make capture-hw` (add `VCD=captures/x.vcd`) |
 | Headless synth+PnR+bitstream (Gowin, primary) | `make build` or `make build BUILD_TARGET=<name>` |
 | Open-source lint/build sanity check | `make build-oss` |
 | Flash to SRAM (volatile, fast iteration) | `make flash-sram` |
@@ -68,6 +70,17 @@ not negotiable in this repo:
   debug session is hours. "It built" says nothing about whether it works.
 - **Treat every toolchain warning as an error until you've read it.** Grep the build log for
   `WARN` after every build.
+- **`make build` now fails on timing violations, not just on toolchain exit code.** `gw_sh` exits 0
+  on a design with violated setup paths and writes a bitstream anyway; an `la_capture` build did
+  exactly that (15 violated endpoints, Fmax 96.8 MHz against 108 MHz) and *passed its hardware
+  test* at room temperature. `gowin_build.sh` now parses
+  `impl/pnr/project_tr_content.html` and fails on any setup/hold violation, on a missing timing
+  report, or on an analysis that covered 0 paths. Adding an `.sdc` makes the analysis run; this
+  makes the result matter.
+- **Mutation-test a testbench before trusting it.** Break the RTL on purpose and confirm the test
+  fails. This found dead logic in `capture_engine`'s trigger: the `!match_d` term could be deleted
+  with every test still passing, because the comment described edge-triggering the code did not
+  implement.
 - **Measure, don't assume** — assert on values recovered from the design (e.g. actual bit time on
   the wire), not on the constants you believe you set.
 - **Change one variable at a time**, keeping a known-good state to fall back to.
@@ -109,7 +122,22 @@ implementation. Full rationale in `docs/architecture.md`.
   `RECONFIG_N`, `READY`, `JTAGSEL_N` in `impl/pnr/project.rpt.txt`. Second instance of the same
   lesson: **pin 4 (the 27 MHz clock) is `LPLL1_T_in`**, the left PLL's reference input, not one of
   the five `GCLK_PIN`s — so a design that bypasses the PLL reaches the global clock network through
-  generic routing (`WARN PR1014`). Fix by instantiating an `rPLL`, not by suppressing the warning.
+  generic routing (`WARN PR1014`). Fix by instantiating an `rPLL`, not by suppressing the warning
+  — `la_capture` does. Measured outcome: the system clock does move onto `PRIMARY` across all four
+  quadrants, but `PR1014` persists, now naming the 27 MHz `clk_d` reference hop into the PLL
+  rather than the system clock. Expected; see `boards/tangnano20k/pinout.md`.
+- **Pin 87 is `MODE1`** (verified 2026-08-02) and pins **13/75/76/86 wire to the BL616** as
+  `SPI_SCLK/MISO/MOSI/DIR`. There is no safe external reset pin on this board.
+- **The Gowin report's bank voltages are a tool default for banks with no assigned I/O**, not the
+  board's supply. It lists pins 25–42 and 79–86 as `LVCMOS18`; the schematic's POWER sheet shows
+  every `VCCO` fed by a 3.3 V LDO. `docs/` holds the schematic and datasheet PDFs — read them with
+  the `Read` tool's `pages` argument, or `pdftotext -layout` for the net lists.
+- **`iverilog` and `GowinSynthesis` are each permissive where the other is strict, in both
+  directions.** `WARN (EX3638)` (implicit net) is a Gowin warning and an iverilog hard error;
+  `ERROR (EX2000)` (a reg driven from two `always` blocks) is a Gowin hard error that iverilog
+  simulates without complaint. Passing one toolchain is not evidence the RTL is well formed —
+  run `make sim` *and* `make build`. New RTL here uses `` `default_nettype none `` to make the
+  first class of bug an error in both.
 - **Every target needs a `.sdc` or no timing analysis runs at all.** `tools/build/gowin_build.sh`
   auto-includes `src/targets/<target>/<target>.sdc` when present. Without one, `gw_sh` emits
   `WARN (TA1132) 'clk' was determined to be a clock but was not created` and reports zero timing

@@ -51,8 +51,10 @@ in reset forever, which cost three sessions of hardware debugging (see `PROGRESS
 on `leds[4]`. **Before mapping any signal to a pin, check the Function column of the pin report
 for a dual-purpose name** (`MODE*`, `DONE`, `RECONFIG_N`, `READY`, `JTAGSEL_N`, …).
 
-If a physical reset button is ever wanted, the second button on **pin 87** is the candidate —
-but verify it has no dual-purpose function first.
+**Pin 87 was the proposed reset-button candidate "pending verification". Verified 2026-08-02: it
+is `MODE1`** — the other half of the same configuration strap pair as pin 88's `MODE0`. Do not use
+it as a reset either. This board exposes no safe external reset pin; use an internal power-on
+reset, as both `bringup_selftest` and `la_capture` do.
 
 ### Pin 4 (the 27 MHz clock) is a PLL input, not a global-clock pin
 
@@ -71,14 +73,65 @@ WARN (PR1014) Generic routing resource will be used to clock signal 'clk_d' by t
 This is harmless for `bringup_selftest` (27 MHz, 205 MHz Fmax, 0 violated endpoints) and **should
 not be worked around** — the correct fix is to feed pin 4 into an `rPLL`, which is that pin's
 designed purpose. A PLL output reaches a global clock buffer natively. Phase 1 needs a PLL anyway
-for its oversampling capture clock, so the warning should clear as a side effect.
+for its oversampling capture clock.
+
+**Measured 2026-08-02, after `la_capture` actually did this:** the fix works but the warning does
+not disappear. What changes is its subject. Before, the design's system clock reached logic
+through generic routing; now the report's Global Clock Signals table shows the 108 MHz `clk_s` on
+`PRIMARY` across all four quadrants (`TR TL BR BL`), and `PR1014` instead names `clk_d` — the
+27 MHz reference hop from pin 4 into the adjacent PLL. That net has one load and, per the timing
+report, no registers in its domain at all (`No timing paths to get frequency of clk27`). So the
+warning is now about something with nothing timing-critical on it, and is expected to persist.
+
+### ⚠️ Pins 13, 75, 76 and 86 wire to the BL616
+
+Same hazard class as pins 69/70. The schematic's `USB_JTAG` sheet lists `PIN13_SPI_SCLK`,
+`PIN75_SPI_MISO`, `PIN76_SPI_MOSI` and `PIN86_SPI_DIR` as BL616 connections — driving any of them
+externally means contending with the debug MCU. Pins 71–74 (`HSPI_D0..D3`) appear **only** in the
+J6/J8 header nets despite the similar naming, and are safe.
+
+### ⚠️ The Gowin report's bank voltages are a tool default, not this board
+
+`impl/pnr/project.rpt.txt` lists pins 25–42 and 79–86 as `LVCMOS18` with `BankVccio 1.8`. That is
+what the tool assumes for a bank holding **no assigned I/O** — it is not what the board supplies.
+The schematic's POWER sheet shows `VCCO_4` and `VCCO_5` fed by `ME6211C33` (3.3 V LDOs), and the
+datasheet's pinout legend marks every bank `V_IO = 3.3V`. Trusting the report here would rule out
+the board's most useful contiguous run of probe pins for no reason.
+
+## Used by `la_capture` (Phase 1 logic analyser)
+
+`clk`, `uart_rx`, `uart_tx` and `leds[5:0]` as above. Twelve probe inputs, all 3.3 V, all on the
+2×20 headers, none carrying an onboard component beyond the unpopulated 40-pin LCD FPC connector:
+
+| Channel | Signal | Pin | Board net | Notes |
+|---|---|---|---|---|
+| `probe[0]` | DOTCLK | 77 | `LCD_CK` | `GCLKT_1` — the only global-clock-capable header pin left after the BL616 SPI pins are excluded. Reserved for a future synchronous-capture mode |
+| `probe[1]` | HSYNC | 25 | `LCD_HS` | also 100 Ω series to HDMI `CEC` |
+| `probe[2]` | VSYNC | 26 | `LCD_VS` | also 2.2 kΩ to HDMI `HPD` |
+| `probe[3]` | DE | 48 | `LCD_DE` | |
+| `probe[4..8]` | D0..D4 | 27, 28, 29, 30, 31 | `LCD_B7..B3` | FPC connector only |
+| `probe[9..11]` | D5..D7 | 71, 72, 73 | `HSPI_D0..D2` | header only, no other connection |
+
+**Physical wiring note.** On the left header, pins 27, 28, **25, 26**, 29, 30, 31 are seven
+*consecutive* positions in that order — 25 and 26 sit between 28 and 29, which is not what the
+numbering suggests. Pins 71/72 are adjacent near the bottom of the right header; 73 is near the
+top of the left one.
+
+**Avoided deliberately:** 32–42 (double as the HDMI/DVI differential pairs through 499 Ω
+resistors and ESD clamps), 49 (`LCD_BL`, drives the backlight regulator's enable), 51 (`PA_EN`,
+audio amp), 54/55/56 (I²S to the codec), 79 (`WS2812` LED), 80–86 (microSD, 10 kΩ pull-ups),
+52/53 (HDMI DDC through 2N7002 level shifters).
+
+⚠️ **Unresolved before probing a real calculator: the HP Prime's LCD interface voltage is
+unknown.** These inputs are 3.3 V LVCMOS, whose V_IH is about 2.0 V. If the Prime's bus runs at
+1.8 V it will not register reliably and a level shifter is required. Measure before connecting.
 
 Other reference points (not yet wired into any target):
 
 | Signal | Pin | Notes |
 |---|---|---|
-| `btn[1]` (second button) | 87 | |
-| RGB LED | 79 | |
+| `btn[1]` (second button) | 87 | ⚠️ `MODE1` config strap — see above |
+| RGB LED | 79 | `WS2812`, has an LED attached |
 
 ## Reserved for Phase 3 (parallel RGB LCD header, 40-pin connector)
 

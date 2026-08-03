@@ -1,0 +1,7 @@
+src/common/uart_tx.v
+src/common/uart_rx.v
+src/common/sync2.v
+src/common/pll_27_108.v
+src/common/video_timing_gen.v
+src/common/capture_engine.v
+src/targets/la_capture/la_capture_top.v
