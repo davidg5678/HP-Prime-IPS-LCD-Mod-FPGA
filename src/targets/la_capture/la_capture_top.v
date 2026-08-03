@@ -11,12 +11,24 @@
 // entire capture-trigger-drain-decode path with no calculator attached and no
 // re-synthesis to switch back.
 //
-// CHANNEL MAP (probe[n] -> sample bit n; see boards/tangnano20k/pinout.md)
-//     0  DOTCLK      pin 77
-//     1  HSYNC       pin 25
-//     2  VSYNC       pin 26
-//     3  DE          pin 48
-//     4..11  D0..D7  pins 27, 28, 29, 30, 31, 71, 72, 73
+// CHANNEL MAP (probe[n] -> sample bit n). FPGA pins are chosen around the RGB
+// LCD connector, which Phase 3/4 needs and which permanently reserves pins
+// 25-42, 48 and 77 -- see la_capture.cst and boards/tangnano20k/pinout.md.
+// HP Prime flex pins are from the scope survey in docs/.
+//
+//     ch  signal   FPGA pin   Prime flex pin
+//     0   DOTCLK   80         10   13.1 MHz
+//     1   HSYNC    71          9   9.61 kHz
+//     2   VSYNC    53          8   37.7 Hz
+//     3   DE       51          7   9.8 kHz in 24.7 ms bursts
+//     4   D0       72         11
+//     5   D1       73         12
+//     6   D2       74         13
+//     7   D3       85         14
+//     8   D4       79         15
+//     9   D5       56         16
+//     10  D6       54         17
+//     11  D7       55         18
 //
 // HOST PROTOCOL -- single command bytes, two of them followed by a payload.
 //     0xAA          reset: abort capture, restart the mock source, idle the drain

@@ -45,7 +45,8 @@ HDR_MAGIC, HDR_VERSION, HDR_LEN = 0xA5, 0x02, 10
 CHUNK = 4096
 
 # Channel map -- must match the CHANNEL MAP comment in la_capture_top.v and the
-# pin table in boards/tangnano20k/pinout.md.
+# pin table in boards/tangnano20k/pinout.md. On the HP Prime's 45-pin LCD flex
+# these are pins 10, 9, 8, 7 and 11..18 respectively.
 CHANNELS = ["DOTCLK", "HSYNC", "VSYNC", "DE"] + [f"D{i}" for i in range(8)]
 C_DOTCLK, C_HSYNC, C_VSYNC, C_DE = 0, 1, 2, 3
 

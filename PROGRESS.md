@@ -3,6 +3,103 @@
 Update this file at the end of each work session so a future session (human or agent) can
 pick up cold. Newest entries at the top.
 
+## 2026-08-02 (part 5) — Prime flex identified from scope data; probe pins re-mapped around the LCD connector
+
+**Status: `la_capture` re-pinned, rebuilt, reflashed and re-verified on hardware
+(`make capture-hw` → PASS, and the VSYNC-edge/wrap case → PASS). The twelve probe channels now
+use ZERO of the RGB LCD connector's pins, so Phase 3/4 can still drive a panel. No RTL, testbench
+or host-tool change — only `la_capture.cst`, a new `options.tcl`, and docs.**
+
+### The scope survey identifies the interface
+
+`docs/HP Prime LCD Pinout.xlsx` (45-pin flex). The arithmetic closes, which is what makes the
+identification trustworthy rather than a guess:
+
+| Flex pin | Measured | Signal |
+|---|---|---|
+| 7 | 9.8 kHz bursts, 24.7 ms on / 1.96 ms off | DE |
+| 8 | 37.7 Hz | VSYNC |
+| 9 | 9.61 kHz | HSYNC |
+| 10 | 13.1 MHz | DOTCLK |
+| 11–18 | logic | D0–D7 |
+
+- Frame 26.53 ms, line 104.1 µs → **254.9 lines/frame**.
+- Pin 7's *envelope* is the vertical structure: 24.7 ms = 237 active lines, 1.96 ms = 18.8
+  blanking lines, total 256.2 — agrees with 254.9 within scope precision. Only DE has that shape.
+- ~240 active of 255 total is a **320×240 panel**, which is the Prime's display.
+- 1363 DOTCLKs per line. At 3 clocks/pixel that is 960 active + 403 blanking; at 4 clocks/pixel
+  1280 + 83. Both plausible — deliberately not guessed, since resolving it is what the capture is
+  for.
+
+Twelve consecutive flex pins (7–18) for twelve channels, which is a clean fit to the existing
+front end.
+
+### The probe pin map was incompatible with Phase 3/4 — caught before anything was soldered
+
+The original `la_capture` pin map predated the schematic analysis and put **nine of twelve probes
+on RGB LCD connector pins** (77, 25, 26, 48, 27–31). It would have worked perfectly for Phase 1
+and made Phase 3 impossible. The user caught it by asking whether re-mapping would cost the LCD
+connector — the answer was that the *existing* map already had.
+
+The DISPLAY sheet shows the connector permanently reserves twenty pins (25–42, 48, 77) plus 49
+and 15–18. After also removing the BL616 pins and the LEDs, the 2×20 headers have exactly
+**thirteen** pins left for twelve probes.
+
+### Five of those thirteen are dedicated SSPI configuration pins
+
+`gw_sh` refused them outright:
+
+```
+ERROR (PR2017) 'probe[9]' cannot be placed according to constraint,
+               for the location is a dedicated pin (SSPI)
+```
+
+Without `set_option -use_sspi_as_gpio 1` only **eight** usable pins remain — not enough. So
+Phase 1's twelve channels and Phase 4's LCD output can only coexist by reclaiming the SSPI pins.
+Added `src/targets/la_capture/options.tcl` and a generic hook in `gowin_build.sh` that sources
+`src/targets/<target>/options.tcl` when present; deliberately per-target rather than global,
+since repurposing configuration pins is not something to switch on for every build. Safe here:
+configuration is over JTAG and user flash is on MSPI (59–62), neither of which this touches.
+
+### Final map (full table with caveats in `boards/tangnano20k/pinout.md`)
+
+    flex   7   8   9  10  11  12  13  14  15  16  17  18
+           DE  VS  HS  CK  D0  D1  D2  D3  D4  D5  D6  D7
+    FPGA   51  53  71  80  72  73  74  85  79  56  54  55
+
+Confirmed from the placed design: all twelve at the constrained pins, all Vccio 3.3, DOTCLK on
+`GCLKT_0`, and **none of the 21 LCD-connector pins claimed**.
+
+Three choices worth not re-litigating: DOTCLK on 80 because it is `GCLKT_0` (synchronous capture,
+the only way a full frame fits in memory, needs a real global clock buffer); VSYNC on 53 because
+it is the one pin with a 2.2 kΩ pull-up and a corrupted 37.7 Hz frame sync is obvious where a
+corrupted data bit is silent; pin 51 over the spare 52 because 52 carries the second DDC pull-up.
+
+### Also corrected
+
+`pinout.md`'s Phase 3 table was carrying numbers from a Sipeed 480×272 example with a "re-verify
+before relying on this" caveat. Now verified against the schematic and extended: the connector is
+wired **RGB565** (R2..R0, G1..G0 and B2..B0 are tied to GND at the connector), and `LCD_INT0..3`
+share pins 15–18 with four of the six LEDs.
+
+### Open / next
+
+- ⚠️ **Blocker for real probing: the Prime's logic level on flex pins 7–18 is unmeasured.** The
+  survey records amplitudes for pins 27–29 and the 32–42 group but only frequencies for 7–18.
+  These inputs are 3.3 V LVCMOS (V_IH ≈ 2.0 V); 1.8 V will not register. Measure flex pin 10
+  (DOTCLK, continuously toggling) before connecting.
+- ☠️ Flex pins 32–42 carry 16.88 V, −8.3 V, −3.3 V and 15.4 Vpp at 26.3 kHz — the TFT gate-driver
+  region. Also lethal: flex 3/4 (5.5 V), 25 and 31 (5 V).
+- Capture depth against real timing: 32768 samples at 108 MHz is 303 µs = **2.9 lines**. Enough to
+  settle clocks-per-pixel and porch structure; a full frame is 2.86 M samples. Even synchronous
+  capture on DOTCLK is 347,480 samples per frame, 10× the buffer — full-frame capture for Phase 2
+  means the board's 64 Mbit SDRAM.
+- Flex pins 27/28/29 (three isolated 3.3 V logic lines) look like the controller's SPI config
+  interface. Capturing them at power-on would give the ILI9322's actual register settings rather
+  than inferring them, which would de-risk Phase 3.
+- Physical connection will be a **soldered pigtail to the flex** — hence getting the pin map right
+  before wiring rather than after.
+
 ## 2026-08-02 (part 4) — PHASE 1: logic analyser capturing, triggering and draining on hardware
 
 **Status: Phase 1 RTL complete and verified on the board. `make capture-hw` →

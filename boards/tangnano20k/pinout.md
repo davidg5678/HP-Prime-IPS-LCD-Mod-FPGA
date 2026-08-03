@@ -100,31 +100,100 @@ the board's most useful contiguous run of probe pins for no reason.
 
 ## Used by `la_capture` (Phase 1 logic analyser)
 
-`clk`, `uart_rx`, `uart_tx` and `leds[5:0]` as above. Twelve probe inputs, all 3.3 V, all on the
-2×20 headers, none carrying an onboard component beyond the unpopulated 40-pin LCD FPC connector:
+### The constraint that determines every probe pin
 
-| Channel | Signal | Pin | Board net | Notes |
-|---|---|---|---|---|
-| `probe[0]` | DOTCLK | 77 | `LCD_CK` | `GCLKT_1` — the only global-clock-capable header pin left after the BL616 SPI pins are excluded. Reserved for a future synchronous-capture mode |
-| `probe[1]` | HSYNC | 25 | `LCD_HS` | also 100 Ω series to HDMI `CEC` |
-| `probe[2]` | VSYNC | 26 | `LCD_VS` | also 2.2 kΩ to HDMI `HPD` |
-| `probe[3]` | DE | 48 | `LCD_DE` | |
-| `probe[4..8]` | D0..D4 | 27, 28, 29, 30, 31 | `LCD_B7..B3` | FPC connector only |
-| `probe[9..11]` | D5..D7 | 71, 72, 73 | `HSPI_D0..D2` | header only, no other connection |
+Phase 3 drives a panel from the board's own 40-pin RGB LCD FPC connector and Phase 4 does that
+*while* capturing, so those pins can never be shared with the probes. Per the DISPLAY sheet of
+`docs/Tang_Nano_20K_3923_Schematics-1.pdf` the connector permanently reserves **twenty** FPGA pins:
 
-**Physical wiring note.** On the left header, pins 27, 28, **25, 26**, 29, 30, 31 are seven
-*consecutive* positions in that order — 25 and 26 sit between 28 and 29, which is not what the
-numbering suggests. Pins 71/72 are adjacent near the bottom of the right header; 73 is near the
-top of the left one.
+| Function | Pins |
+|---|---|
+| `LCD_R7..R3` | 38, 39, 40, 41, 42 |
+| `LCD_G7..G2` | 32, 33, 34, 35, 36, 37 |
+| `LCD_B7..B3` | 27, 28, 29, 30, 31 |
+| `LCD_CK`, `LCD_HS`, `LCD_VS`, `LCD_DE` | 77, 25, 26, 48 |
 
-**Avoided deliberately:** 32–42 (double as the HDMI/DVI differential pairs through 499 Ω
-resistors and ESD clamps), 49 (`LCD_BL`, drives the backlight regulator's enable), 51 (`PA_EN`,
-audio amp), 54/55/56 (I²S to the codec), 79 (`WS2812` LED), 80–86 (microSD, 10 kΩ pull-ups),
-52/53 (HDMI DDC through 2N7002 level shifters).
+plus `LCD_BL` (49) and `LCD_INT0..3` (15–18, shared with the LEDs).
 
-⚠️ **Unresolved before probing a real calculator: the HP Prime's LCD interface voltage is
-unknown.** These inputs are 3.3 V LVCMOS, whose V_IH is about 2.0 V. If the Prime's bus runs at
-1.8 V it will not register reliably and a level shifter is required. Measure before connecting.
+Subtract those, the BL616 pins (13/69/70/75/76/86) and the six LEDs, and the 2×20 headers have
+exactly **thirteen** pins left for twelve probes. Five of the thirteen — 52, 53, 54, 55, 56 — are
+the device's dedicated SSPI configuration pins, which `gw_sh` refuses to place user I/O on unless
+`set_option -use_sspi_as_gpio 1` is given (`src/targets/la_capture/options.tcl`). **Without that
+option only eight usable pins remain, and the analyser needs twelve** — so Phase 1's channel count
+and Phase 4's LCD output only coexist by reclaiming the SSPI pins. Sipeed's own examples do the
+same to reach the I²S codec on 54/55/56.
+
+### Probe wiring reference
+
+HP Prime 45-pin LCD flex → Tang Nano. Flex signal identification is from the scope survey in
+`docs/HP Prime LCD Pinout.xlsx`; see `PROGRESS.md` for the arithmetic that supports it.
+
+| Prime flex | Signal | Measured | Channel | FPGA pin | Header | Caveat on the FPGA pin |
+|---|---|---|---|---|---|---|
+| 7 | DE | 9.8 kHz, 24.7 ms on / 1.96 ms off | `probe[3]` | 51 | R9 | amp `SD_MODE`; also `RPLL2_T_in` (unused — this design uses the *left* PLL) |
+| 8 | VSYNC | 37.7 Hz | `probe[2]` | 53 | R19 | ⚠ 2.2 kΩ pull-up to 3V3 (HDMI DDC via 2N7002) |
+| 9 | HSYNC | 9.61 kHz | `probe[1]` | 71 | R18 | clean, header only |
+| 10 | DOTCLK | 13.1 MHz | `probe[0]` | 80 | R4 | `GCLKT_0`; microSD DAT2 10 kΩ pull-up |
+| 11 | D0 | — | `probe[4]` | 72 | R17 | clean, header only |
+| 12 | D1 | — | `probe[5]` | 73 | L1 | clean, header only |
+| 13 | D2 | — | `probe[6]` | 74 | L2 | clean, header only |
+| 14 | D3 | — | `probe[7]` | 85 | L4 | microSD DAT1 10 kΩ pull-up |
+| 15 | D4 | — | `probe[8]` | 79 | R14 | `GCLKC_0`; WS2812 data-in via 100 Ω |
+| 16 | D5 | — | `probe[9]` | 56 | R7 | SSPI `SO/D1`; amp input, high-Z |
+| 17 | D6 | — | `probe[10]` | 54 | R8 | SSPI `DIN/CLKHOLD_N`; amp input, high-Z |
+| 18 | D7 | — | `probe[11]` | 55 | R11 | SSPI `SSPI_CS_N/D0`; amp input, high-Z |
+
+**Ground:** tie the pigtail's return to header GND — right header position 2 or 15, or left
+header position 20. A common ground is not optional; without it every channel is meaningless.
+
+**Pin 52 is the single spare.** It carries the other 2.2 kΩ DDC pull-up, which is why VSYNC took
+53 rather than both going there.
+
+Three placement choices worth not re-litigating:
+
+- **DOTCLK on pin 80** because it is `GCLKT_0`. Nothing clocks off it today, but sampling *on*
+  DOTCLK rather than oversampling is how a full frame ever fits in memory, and that needs a real
+  global clock buffer. Same lesson as pin 4.
+- **VSYNC on pin 53**, the one pin with a 2.2 kΩ pull-up. It makes the Prime's driver sink an
+  extra ~1.5 mA when low; if its V_OL rises past the FPGA's 0.8 V V_IL that channel misreads.
+  A corrupted 37.7 Hz frame sync is instantly obvious in the decode; a corrupted data bit is
+  silent and yields plausible-looking wrong pixels.
+- **Pin 51 despite being the amp's shutdown pin**, because the alternative (52) carries the second
+  DDC pull-up. With no speaker on J4 the amp is inert, and `PULL_MODE=DOWN` holds it shut down
+  whenever nothing is connected.
+
+### ☠️ Prime flex pins that will destroy the FPGA
+
+Do not connect any of these to anything on the Tang Nano:
+
+| Flex pins | Why |
+|---|---|
+| 32–42 | TFT gate-driver region: 16.88 V, −8.3 V, −3.3 V rails and 15.4 Vpp swings at 26.3 kHz |
+| 3, 4 | 5.5 V |
+| 25, 31 | 5 V |
+| 35, 36 | 16.88 V / −8.3 V |
+
+Flex pins 19–21 read as noisy ground and 1/2/5/6/45 are ground.
+
+### ⚠️ Unresolved: the Prime's logic level
+
+The scope survey records amplitudes for flex pins 27–29 ("3.3 v logic") and for the 32–42 group,
+but for **pins 7–18 it records only frequencies**. These FPGA inputs are 3.3 V LVCMOS with
+V_IH ≈ 2.0 V:
+
+- 3.3 V → wire directly.
+- 1.8 V → will not register; a level shifter is required. Flex pin 24 reading 2 V hints there may
+  be a lower-voltage domain on this flex.
+
+**Measure the logic HIGH level on flex pin 10 (DOTCLK) before connecting anything.** It toggles
+continuously, so it is the easiest to read cleanly.
+
+### Worth capturing later: flex pins 27, 28, 29
+
+Three "3.3 v logic" lines, isolated from the video group by the noisy-ground block at 19–21.
+Shape and count match an ILI9322's SPI configuration interface (CS / SCL / SDI). Capturing them
+at power-on would yield the controller's actual register settings — mode, porches, colour format
+— rather than inferring them from video timing, which would de-risk Phase 3 considerably.
 
 Other reference points (not yet wired into any target):
 
@@ -135,17 +204,29 @@ Other reference points (not yet wired into any target):
 
 ## Reserved for Phase 3 (parallel RGB LCD header, 40-pin connector)
 
-| Signal | Pins | Notes |
-|---|---|---|
-| `LCD_R[4:0]` | 38-42 | |
-| `LCD_G[5:0]` | 32-37 | |
-| `LCD_B[4:0]` | 27-31 | |
-| `LCD_DEN` (data enable) | 48 | |
-| `LCD_CLK` | 77 | |
+**Verified 2026-08-02 against the DISPLAY sheet of `docs/Tang_Nano_20K_3923_Schematics-1.pdf`,
+which is the board's own wiring and therefore panel-independent.** The previous version of this
+table came from Sipeed's `rgb_lcd/lcd_480_272/color_bar` example and carried a "re-verify before
+relying on this" caveat; it is now confirmed and the low-order colour bits are documented.
 
-These LCD-header numbers come from Sipeed's `rgb_lcd/lcd_480_272/color_bar` example and are
-for a 480x272 panel; re-verify against whatever panel is actually sourced for Phase 3 before
-relying on them.
+| Signal | FPGA pins | Notes |
+|---|---|---|
+| `LCD_R7..R3` | 38, 39, 40, 41, 42 | R2..R0 are tied to GND at the connector — 5 bits of red |
+| `LCD_G7..G2` | 32, 33, 34, 35, 36, 37 | G1..G0 tied to GND — 6 bits of green |
+| `LCD_B7..B3` | 27, 28, 29, 30, 31 | B2..B0 tied to GND — 5 bits of blue |
+| `LCD_CK` | 77 | also `GCLKT_1` |
+| `LCD_HS` | 25 | |
+| `LCD_VS` | 26 | |
+| `LCD_DE` | 48 | |
+| `LCD_BL` | 49 | backlight regulator enable |
+| `LCD_INT0..3` | 15, 16, 17, 18 | ⚠ shared with `leds[0..3]` |
+
+So the connector is a **RGB565** interface — 5:6:5 is a property of the board's wiring, not of
+whichever panel is plugged in. Twenty pins, plus the backlight.
+
+⚠️ `LCD_INT0..3` share pins 15–18 with four of the six onboard LEDs. If Phase 3's panel needs
+those interrupt lines (touch, typically), those LEDs must be given up. `la_capture` uses all six
+as status indicators today; nothing has had to choose yet.
 
 The onboard BL616 MCU provides the composite USB device (DirtyJTAG-v2 JTAG + CDC-ACM UART) —
 no external USB-serial adapter is needed for the UART path above. Confirmed working; see the

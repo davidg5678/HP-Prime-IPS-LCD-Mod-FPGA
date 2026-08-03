@@ -11,6 +11,11 @@ TDIR="$ROOT/src/targets/$TARGET"
 FILES_TXT="$TDIR/files.txt"
 CST="$TDIR/$TARGET.cst"
 SDC="$TDIR/$TARGET.sdc"
+# Optional per-target `set_option` lines, sourced verbatim into the generated
+# .tcl before the sources are added. Exists because some targets need to
+# repurpose dedicated configuration pins as GPIO (see la_capture), and that is
+# emphatically not something to switch on globally for every build.
+OPTS="$TDIR/options.tcl"
 
 [ -f "$FILES_TXT" ] || { echo "BUILD FAIL: missing $FILES_TXT"; exit 1; }
 [ -f "$CST" ]       || { echo "BUILD FAIL: missing $CST"; exit 1; }
@@ -26,6 +31,7 @@ mkdir -p "$BUILD_DIR/pnr"
 RUN_TCL="$BUILD_DIR/${TARGET}_run.tcl"
 {
   echo "set_device -name GW2AR-18C GW2AR-LV18QN88C8/I7"
+  [ -f "$OPTS" ] && cat "$OPTS"
   echo "add_file \"$CST\""
   [ -f "$SDC" ] && echo "add_file \"$SDC\""
   while IFS= read -r f; do [ -n "$f" ] && echo "add_file \"$ROOT/$f\""; done < "$FILES_TXT"
