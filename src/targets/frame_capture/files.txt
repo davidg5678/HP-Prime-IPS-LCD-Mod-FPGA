@@ -1,0 +1,7 @@
+src/common/uart_tx.v
+src/common/uart_rx.v
+src/common/sync2.v
+src/common/pll_27_108.v
+src/common/dotclk_sampler.v
+src/common/sdram_ctrl.v
+src/targets/frame_capture/frame_capture_top.v

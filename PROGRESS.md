@@ -3,6 +3,77 @@
 Update this file at the end of each work session so a future session (human or agent) can
 pick up cold. Newest entries at the top.
 
+## 2026-08-03 (part 2) — WHOLE FRAME CAPTURED: 320x240 of the Prime's screen
+
+**Status: `make frame-hw` → `PASS: frame captured and decoded, 240 lines of 320 pixels, 130 runt
+edges rejected in hardware`.** A complete frame of the calculator's display, captured into SDRAM
+and decoded into an image. New: `src/common/dotclk_sampler.v`,
+`src/targets/frame_capture/`, `sim/targets/frame_capture/`, `python/tools/frame_capture.py`,
+`make frame-hw`.
+
+The decoded image is plainly the Prime's home screen: 613 distinct colours, 74% white background,
+**row 0 a uniform `25 62 a8`** — the blue title bar — and rows alternating between 1 distinct
+colour (blank) and 20–48 (text glyphs). 88.7% of pixels are greyscale, the rest blues.
+
+### The bandwidth arithmetic chose the architecture, and chose what NOT to build
+
+The obvious next move after the SDRAM worked was burst mode. The numbers said otherwise:
+
+| Strategy | Rate | vs ~10.8 MW/s available |
+|---|---|---|
+| oversampled 108 MHz, 1 sample/word | 108 MW/s | impossible |
+| oversampled 108 MHz, 2 samples/word | 54 MW/s | impossible |
+| synchronous on DOTCLK, 1 sample/word | 13.29 MW/s | too fast |
+| **synchronous on DOTCLK, 2 samples/word** | **6.64 MW/s** | **fits, 63% utilisation** |
+
+So the answer was not a faster controller but cheaper sampling. Bursts would have been optimising
+something that was never the bottleneck. Synchronous capture also cuts a frame from 11 MB to
+688 KB — the 8 MB die holds eleven — and eliminates the runt-edge problem at source instead of
+filtering it host-side.
+
+`src/common/dotclk_sampler.v` samples once per DOTCLK on the rising edge, rejecting edges closer
+than 4 cycles. On real hardware it rejected **130 runts** out of ~352,499 edges, consistent with
+the 2-in-8064 rate measured during Phase 1 — and every one of them would have shifted a pixel
+triplet and corrupted the rest of a line.
+
+### Two bugs, both off-by-one, both found in simulation
+
+1. **Auto-precharge on the wrong bit** (in `sdram_ctrl`, found earlier by the SDRAM model):
+   `{2'b00, 1'b1, a_col}` puts A10's flag on A8, which on a 256-column part is inside the column
+   field.
+2. **Payload decode read one cycle early.** `do_read` is a registered pulse, so by the cycle it
+   is high, `arg_sr` has already absorbed the last payload byte — every field shifts one position.
+   It surfaced as `reply_count = 0`. `la_capture` avoided this by decoding from `rx_data` in the
+   same cycle; here a 6-byte payload lands wholly in the shift register first.
+
+### Structure
+
+Capture is armed by the host and starts on the **next VSYNC falling edge**, so a capture is
+frame-aligned by construction rather than by the host guessing. An 8-entry FIFO sits between the
+sampler and the controller to absorb refresh stalls; overrun is reported, never silently
+tolerated. It has not fired.
+
+The testbench uses **Phase 1's `video_timing_gen` as its stimulus** — an independent
+implementation of the protocol from anything in the capture path, so agreement is evidence rather
+than tautology.
+
+### Numbers
+
+- Gowin signoff: 3463 paths, 0 setup / 0 hold. 759 logic (4%), 21/66 package I/O.
+- All 55 SDRAM ports on internal pads, zero package pins — `frame_capture` uses exactly the same
+  21 package pins as `la_capture`.
+- 180,000 words = 703 KB drained in 8.7 s at 1 Mbaud.
+- 360,000 samples → 240 DE runs, **every one exactly 320 pixels**.
+
+### Open
+
+- Drain is 8.7 s per frame, entirely UART-bound. Storing only active-DE samples would cut it to
+  ~2.6 s; a faster link would do better still.
+- Only one frame per arm. The die holds eleven, so multi-frame capture (motion, or averaging) is
+  a parameter change plus host support.
+- `la_capture` is still the right tool for protocol questions — oversampling shows edge placement
+  and glitches that synchronous capture cannot. The two are complementary, not successive.
+
 ## 2026-08-03 — SDRAM WORKING: 8 MB written and verified on hardware
 
 **Status: `make sdram-hw` → `PASS: SDRAM self-test, 2,097,152 words (8 MB) written and verified,

@@ -1,8 +1,9 @@
 SIM_TARGET   ?= bringup_uart_loopback
 BUILD_TARGET ?= bringup_selftest
 VCD          ?=
+PPM          ?=
 
-.PHONY: sim build build-oss flash flash-sram selftest-hw capture-hw sdram-hw check-env clean
+.PHONY: sim build build-oss flash flash-sram selftest-hw capture-hw sdram-hw frame-hw check-env clean
 
 sim:          ; tools/sim/run_sim.sh $(SIM_TARGET)
 build:        ; tools/build/gowin_build.sh $(BUILD_TARGET)
@@ -17,5 +18,9 @@ capture-hw:   ; python3 python/tools/la_capture.py $(if $(PORT),--port $(PORT)) 
 # Full-memory SDRAM test: writes and reads back all 8 MB of the in-package die.
 # Needs `make flash-sram BUILD_TARGET=sdram_selftest` first.
 sdram-hw:     ; python3 python/tools/sdram_selftest.py $(if $(PORT),--port $(PORT))
+# Phase 2: capture a whole 320x240 frame from the Prime into SDRAM and decode
+# it. Needs `make flash-sram BUILD_TARGET=frame_capture` first and the probes
+# attached. PPM=<path> writes the decoded image.
+frame-hw:     ; python3 python/tools/frame_capture.py $(if $(PORT),--port $(PORT)) $(if $(PPM),--ppm $(PPM))
 check-env:    ; tools/setup/check_env.sh
 clean:        ; rm -rf impl build_oss sim/.build
