@@ -3,7 +3,7 @@ BUILD_TARGET ?= bringup_selftest
 VCD          ?=
 PPM          ?=
 
-.PHONY: sim build build-oss flash flash-sram selftest-hw capture-hw sdram-hw frame-hw check-env clean
+.PHONY: sim build build-oss flash flash-sram selftest-hw capture-hw sdram-hw frame-hw stream-hw check-env clean
 
 sim:          ; tools/sim/run_sim.sh $(SIM_TARGET)
 build:        ; tools/build/gowin_build.sh $(BUILD_TARGET)
@@ -22,5 +22,9 @@ sdram-hw:     ; python3 python/tools/sdram_selftest.py $(if $(PORT),--port $(POR
 # it. Needs `make flash-sram BUILD_TARGET=frame_capture` first and the probes
 # attached. PPM=<path> writes the decoded image.
 frame-hw:     ; python3 python/tools/frame_capture.py $(if $(PORT),--port $(PORT)) $(if $(PPM),--ppm $(PPM))
+# Live view: continuously capture, RLE-encode into SDRAM and stream frames.
+# Needs `make flash-sram BUILD_TARGET=frame_stream` first and the probes
+# attached. PPM=captures/live_%d.ppm writes each frame.
+stream-hw:    ; python3 python/tools/frame_stream.py $(if $(PORT),--port $(PORT)) $(if $(PPM),--ppm $(PPM))
 check-env:    ; tools/setup/check_env.sh
 clean:        ; rm -rf impl build_oss sim/.build

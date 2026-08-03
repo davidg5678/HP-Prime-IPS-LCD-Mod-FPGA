@@ -3,6 +3,64 @@
 Update this file at the end of each work session so a future session (human or agent) can
 pick up cold. Newest entries at the top.
 
+## 2026-08-03 (part 3) — LIVE STREAMING: first complete frame streams, later frames partial
+
+**Status: `make stream-hw` → `PASS: live stream, 8 frames decoded at 2.56 fps, 0 truncated`.
+The first frame of every run is a complete 320x240 (76,800 px, 100%); subsequent frames arrive
+but are partial. Root cause not yet found — see Open.** All seven simulations pass. New:
+`src/common/pixel_rle.v`, `src/targets/frame_stream/`, `sim/targets/frame_stream/`,
+`python/tools/frame_stream.py`, `make stream-hw`.
+
+### Measurement decided every part of the design
+
+| Question | Measured answer |
+|---|---|
+| Raise the baud rate? | **No.** 3 Mbaud gives 79 KB/s, 1 Mbaud gives 81 KB/s — per-request latency (~74 ms per 8 KB) dominates, not bit rate. Host also rejects >3 Mbaud outright. |
+| Continuous push at 3 Mbaud? | **Loses 65% of bytes** — the FPGA outruns the host. At 1 Mbaud the FPGA is the slower party, so a continuous push cannot overrun and needs no flow control. |
+| Compress? | **RLE gives 4.6x** on a real captured frame (230,400 → 49,864 bytes) because 74% of a real screen is one flat white. 0.43 fps → 2.0 fps. |
+| Stream every frame? | **No — 19x too fast.** A frame arrives every 26.5 ms and takes ~500 ms to send, so frames are skipped and the compressed frame is buffered in SDRAM while it goes out. |
+
+That last row is why the SDRAM had to exist before this could.
+
+### Four bugs, all found in simulation, all off-by-one in shape
+
+1. **RLE emit counter one step short.** A run is four bytes but the counter was 2 bits stepping
+   3→2→1; the last step assigned both G and B and the `if` overrode the `case`, so **G was
+   silently dropped from every run**. Three bytes went out where four were expected and the whole
+   stream slid out of alignment.
+2. **`busy` lagged the flush it was meant to cover.** `emit` is set by non-blocking assignment, so
+   on the `frame_start` cycle it still reads zero; the consumer concluded the encoder was idle and
+   moved on one cycle before the final run appeared. Lost the last run of every frame.
+3. **Two writers to one FIFO slot in one cycle.** On the cycle the final byte completed a word,
+   `bpos` still read 3 (its wrap is pending), so the "pad the partial word" branch fired *as well
+   as* the packer. Verilog took the later assignment and replaced a correct word with a
+   zero-padded one — exactly one wrong byte at the end of every frame. Padding now has its own
+   state so `bpos` has settled.
+4. **Host decoder was O(n²).** `del buf[:4]` per run on a bytearray, ~12,000 runs per frame. Fixed
+   with an index. Necessary, but it was not the cause of the partial frames.
+
+### A build that passed and a simulation that could not compile
+
+Moving the VSYNC tracker introduced a use-before-declaration of `st`/`S_WAIT`. **GowinSynthesis
+built it cleanly and produced a working bitstream; iverilog refused to elaborate it.** The same
+divergence `CLAUDE.md` records for `WARN (EX3638)`, and a concrete reminder that a passing build
+says nothing about whether the RTL is well formed. It was flashed and tested before the
+simulation was re-run — the wrong order.
+
+### Open
+
+- **Frames after the first are partial** (100%, 76%, then 1–18%). They arrive in a burst rather
+  than paced, so the second and later capture windows are collapsing rather than the data being
+  lost in transit. Ruled out so far: host decoder speed (fixed independently, no change), an
+  odd-length pad byte desynchronising the host (fixed, no change), re-triggering on the tail of
+  the VSYNC pulse already in progress (guard added, no change), and stale `fetch_pending` carried
+  from the send into the capture (cleared, no change). Next things to try: report `rle_pixels`
+  and `frame_words` per frame in the stream so the FPGA's own view is visible, and check whether
+  `cap_on` is being cleared early.
+- 2.0–2.6 fps is the ceiling at 1 Mbaud with this compression. Frame differencing against a
+  reference frame held in SDRAM is the obvious next gain — a calculator UI changes very little
+  between frames — and would plausibly be worth an order of magnitude.
+
 ## 2026-08-03 (part 2) — WHOLE FRAME CAPTURED: 320x240 of the Prime's screen
 
 **Status: `make frame-hw` → `PASS: frame captured and decoded, 240 lines of 320 pixels, 130 runt
