@@ -73,8 +73,17 @@ module lcd_panel_top #(
     //
     // A display driver must not enable a boost converter into a load it cannot
     // detect, and nothing on the 40-pin connector reports back to the FPGA. So
-    // the backlight is now opt-in: `make lcd-hw BL=64`, once the panel is known
-    // to be mated. Off is the only safe default.
+    // the backlight is opt-in: `make lcd-hw BL=255`, once the panel is mated.
+    //
+    // MEASURED 2026-08-04, and it is the second reason to default to 0: the
+    // converter DOES NOT START at 25% duty. A 1 kHz PWM gives a 250 us on-time,
+    // shorter than the LP3320's soft-start, so it never reaches regulation and
+    // the panel stays dark while the status report cheerfully says `bl_on`.
+    // Confirmed from both ends -- it lit immediately when a bitstream that does
+    // not drive pin 49 let the board's 27k pull-up hold EN statically high, and
+    // it lights at BL=255 (99.6% duty, effectively static). A default that
+    // reports "on" while producing no light is worse than one that reports off.
+    // See the PWM_PRESCALE note below before trying to make dimming work.
     parameter [7:0]   BL_DUTY_INIT    = 8'd0
 ) (
     input  wire       clk,       // pin 4, 27 MHz

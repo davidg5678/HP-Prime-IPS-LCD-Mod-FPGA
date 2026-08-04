@@ -3,6 +3,63 @@
 Update this file at the end of each work session so a future session (human or agent) can
 pick up cold. Newest entries at the top.
 
+## 2026-08-04 — PHASE 3 COMPLETE: the panel is displaying
+
+**Status: the physical Orient Display AFY320240A0 is lit and showing all eight test patterns at
+320×240, driven from `src/targets/lcd_panel`. `make lcd-hw` → `PASS: lcd_panel emitting 320x240 in
+371x260 at 62.2 Hz`.** Phase 3 is done.
+
+### What fixed it, and what that confirms
+
+A **reversing (type A ↔ type B) 40-pin 0.5 mm FFC**. Nothing in the FPGA changed. That was the one
+pre-flight check `docs/panel_afy320240a0.md` had flagged as impossible to settle from the schematic,
+and it was the only thing wrong.
+
+Because the whole signal chain now works end to end, a lot is confirmed at once that could not be
+checked any other way:
+
+| Confirmed by the panel actually working | Would have failed how |
+|---|---|
+| Bit order across the connector (descending pin number as vector index ascends) | plausible-looking wrong colours |
+| RGB565 channel wiring, all three channels | swapped or dead channel on BARS |
+| DE gating and the 320×240 active window | missing border line on GRID |
+| Thbp = 43 with Thw nested inside it | image sitting 4 px off |
+| **DCLK polarity — the quarter-period phase offset works** | corrupt pixels, or smear on CHECKER |
+
+That last row is the one worth dwelling on. The datasheet's polarity could not be read off the
+scanned figures and `DPOL` is unreachable because the board grounds the panel's CS. Rather than
+guess, `lcd_timing_gen` places DCLK's edges 4 and 13 phases from the data transition so the design
+is correct on *either* edge. It works, and it would have worked had the polarity been the other way.
+
+### The backlight PWM does not work, and now we know why
+
+**Measured, from both directions.** The LP3320's enable is PWMed at ~1 kHz, so 25% duty is a 250 µs
+on-time — shorter than the converter's soft-start. It never reaches regulation and the panel stays
+dark **while the status report says the backlight is on**, which is the worst combination.
+
+Both ends of the evidence:
+
+- It lit immediately when the board reverted to `la_capture`, a bitstream that does not drive
+  pin 49 at all — leaving the board's 27 kΩ pull-up to hold `EN` statically high.
+- It lights at `BL=255` (99.6% duty, effectively static).
+
+So `BL=255` is the working setting, and `BL_DUTY_INIT` stays 0: a default that reports "on" while
+producing no light is worse than one that reports off. Restoring dimming means raising
+`PWM_PRESCALE` until the on-time comfortably exceeds soft-start (~200 Hz gives 1.25 ms at 25%), then
+walking the duty down on hardware to find where it drops out. **Left unchanged rather than altered
+on a guess** — the LP3320 datasheet would settle it properly.
+
+### Open
+
+- **Phase 4** (`src/targets/passthrough/`) is the remaining work: written, passes simulation end to
+  end, never synthesised. Now unblocked — the panel it drives is known good.
+- Backlight dimming, as above. `BL=255` works; intermediate values do not.
+- Consider `make flash BUILD_TARGET=lcd_panel` to persist. Every power cycle currently reverts to
+  `la_capture` in flash, which leaves pin 49 undriven and the backlight boost enabled by the
+  board's pull-up. Persisting a bitstream that actively drives that pin makes the safe state the
+  default.
+- LED current is still unmeasured at `BL=255`. The panel wants 20–40 mA, abs max 50 mA.
+
 ## 2026-08-03 (part 5) — PHASE 3 ON HARDWARE: FPGA side confirmed. Panel dark — A/B FFC mismatch.
 
 **Status: `make lcd-hw` → `PASS: lcd_panel emitting 320x240 in 371x260 at 62.2 Hz`, on real

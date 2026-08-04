@@ -225,9 +225,15 @@ the logic levels agree. Accept RGB565, generate panel-legal timing rather than p
 Prime's through, keep pin 52 in reserve in case DISP needs driving, and expect the SDRAM
 controller — not Phase 3 RTL — to be the next real piece of work.
 
-**Status (2026-08-03):** the SDRAM controller is done and working on hardware, and the Phase 3
-driver is written and verified in simulation against every number in the AC table above — but has
-**not yet been driven into a physical panel**. `make lcd-hw` checks that the FPGA is emitting
-correct timing; it cannot check that anything is displayed, because nothing on this connector comes
-back to the FPGA. The three checks in the previous section (FFC orientation, backlight current, FFC
-length) are still the ones that need eyes on hardware.
+**Status (2026-08-04): the panel works.** It displays all eight test patterns at 320×240, driven on
+the timing derived above. Of the three pre-flight checks in the previous section, **FFC contact
+orientation was the one that mattered** — the panel and the board's J2 are opposite contact types
+(A vs B), so nothing mated and the symptom was a completely dark panel. A reversing FFC fixed it.
+That check was flagged here as unresolvable from the schematic, and that turned out to be exactly
+right.
+
+One correction to the backlight advice above: **PWM dimming does not work on this board.** The
+LP3320's enable is driven at ~1 kHz, and at 25% duty the 250 µs on-time is shorter than its
+soft-start, so the converter never reaches regulation and the panel stays dark while the status
+report says the backlight is on. Use `BL=255` (effectively a static enable). Raising the PWM period
+so the on-time comfortably exceeds soft-start would probably restore dimming, but that is untested.

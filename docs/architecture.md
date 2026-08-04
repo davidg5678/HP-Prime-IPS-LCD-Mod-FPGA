@@ -72,8 +72,7 @@ is the reference implementation; later phases copy this pattern rather than rein
   phases. Natural point to introduce cocotb, reusing this same Python decode model as the
   testbench oracle.
 
-- **Phase 3 — physical LCD driver. FPGA side CONFIRMED ON HARDWARE; the panel itself is not yet
-  displaying, blocked on a reversing FFC.** Drives the onboard RGB LCD FPC connector (pins documented in
+- **Phase 3 — physical LCD driver. DONE, on hardware.** Drives the onboard RGB LCD FPC connector (pins documented in
   `boards/tangnano20k/pinout.md`). Panel is an Orient Display AFY320240A0-3.5INTH-C2, 320x240 — an
   exact resolution match for the Prime. Analysis in `docs/panel_afy320240a0.md`: **no adapter board
   is needed**, the connectors match on 38 of 40 pins, and the board wires RGB565 (the low colour
@@ -84,11 +83,10 @@ is the reference implementation; later phases copy this pattern rather than rein
   was fully checkable against the datasheet's numeric spec with no panel attached, and it found two
   real bugs that way — a DCLK period that went out of spec at power-on, and a status field that
   reported correctly only outside vertical blanking. On hardware, `make lcd-hw` reports 371×260
-  with 320×240 active at 62.2 Hz, cross-checked against host wall-clock at 62.8 fps. The panel
-  stays dark for a reason outside the FPGA: its FFC and the board's J2 are opposite contact types
-  (A vs B), so nothing mates. See `boards/tangnano20k/pinout.md` — it cannot be corrected in
-  software, because a flipped cable lands the panel's VDD, GND and 19 V backlight rail on FPGA I/O
-  pads.
+  with 320×240 active at 62.2 Hz, cross-checked against host wall-clock at 62.8 fps, and the panel
+  displays every test pattern. Getting there cost one cable: the panel's FFC and the board's J2 are
+  opposite contact types (A vs B), which no amount of software can correct — a flipped cable lands
+  the panel's VDD, GND and 19 V backlight rail on FPGA I/O pads. See `boards/tangnano20k/pinout.md`.
 
 - **Phase 4 — live passthrough. Written and passing simulation end to end; not synthesised, not on
   hardware.** `src/targets/passthrough/` composes Phase 1's capture path into Phase 3's driver path,

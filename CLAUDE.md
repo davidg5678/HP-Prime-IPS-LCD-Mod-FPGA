@@ -3,10 +3,8 @@
 HP Prime calculator LCD reverse-engineering project on a Sipeed Tang Nano 20K
 (Gowin GW2AR-LV18QN88C8/I7). Four phases — see `docs/architecture.md`. Phase 1 (logic analyser)
 and the SDRAM controller are done and working on hardware; Phase 2 captures and decodes whole
-frames; **Phase 3 (panel driver) is confirmed emitting correct timing on hardware**, but the panel
-displays nothing — its FFC is the opposite contact type to the board's socket, so nothing mates
-(blocked on a reversing A↔B FFC). **Phase 4 (passthrough) passes simulation end to end but has
-never been synthesised or run.** See `PROGRESS.md` for current status before assuming anything below has
+frames; **Phase 3 (panel driver) is DONE — the physical panel displays all eight test patterns.**
+**Phase 4 (passthrough) passes simulation end to end but has never been synthesised or run.** See `PROGRESS.md` for current status before assuming anything below has
 actually been run/verified this session.
 
 **The calculator's LCD bus is reverse-engineered and fully specified in
