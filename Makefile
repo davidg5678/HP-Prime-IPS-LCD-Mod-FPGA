@@ -8,9 +8,16 @@ LEDS         ?=
 MODE         ?=
 WATCH        ?=
 
-.PHONY: sim build build-oss flash flash-sram selftest-hw capture-hw sdram-hw frame-hw stream-hw lcd-hw pass-hw check-env clean
+.PHONY: sim simq build build-oss flash flash-sram selftest-hw capture-hw sdram-hw frame-hw stream-hw lcd-hw pass-hw check-env clean
 
 sim:          ; tools/sim/run_sim.sh $(SIM_TARGET)
+# Same testbench, same PASS/FAIL contract, Verilator instead of Icarus.
+# Measured on tb_passthrough: 4 m 29 s -> 14 s, 19x, identical verdict.
+# `sim` remains the reference and the thing to run before a build; `simq` is the
+# inner loop. Keeping both is deliberate -- they disagree about what legal
+# Verilog is, which is exactly what makes their agreement worth something. See
+# the header of tools/sim/run_sim_fast.sh.
+simq:         ; tools/sim/run_sim_fast.sh $(SIM_TARGET)
 build:        ; tools/build/gowin_build.sh $(BUILD_TARGET)
 build-oss:    ; tools/build/oss_cad_build.sh $(BUILD_TARGET)
 flash-sram:   ; tools/build/flash.sh $(BUILD_TARGET)

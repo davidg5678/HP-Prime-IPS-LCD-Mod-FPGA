@@ -1,0 +1,14 @@
+sim/models/rPLL.v
+sim/models/sdram_sim.v
+src/common/uart_tx.v
+src/common/uart_rx.v
+src/common/sync2.v
+src/common/pll_27_108.v
+src/common/video_timing_gen.v
+src/common/dotclk_sampler.v
+src/common/prime_pixel.v
+src/common/lcd_timing_gen.v
+src/common/test_pattern.v
+src/common/sdram_ctrl.v
+src/targets/passthrough/passthrough_top.v
+sim/targets/passthrough_slow/tb_passthrough_slow.v

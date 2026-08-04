@@ -54,6 +54,9 @@ headroom to hold both paths in one bitstream, so mode switches happen over seria
 milliseconds with no rebuild or reflash. `src/targets/bringup_selftest/bringup_selftest_top.v`
 is the reference implementation; later phases copy this pattern rather than reinventing it.
 
+**Phase 4 changes the default, and only the default** — see its roadmap entry below. It adds a third
+setting, AUTO, because a standalone box cannot wait for a host command to start doing its job.
+
 ## Phase roadmap
 
 - **Phase 1 — logic analyzer.** Capture DOTCLK/HSYNC/VSYNC/DE + 8-bit muxed RGB into on-chip
@@ -90,8 +93,9 @@ is the reference implementation; later phases copy this pattern rather than rein
 
 - **Phase 4 — live passthrough. DONE, on hardware.** The HP Prime's screen is reproduced on the
   replacement panel in real time, entirely inside the FPGA. It worked on the first hardware attempt.
-  `make pass-hw` → `PASS: passthrough emitting 320x240 in 371x260 at 62.2 Hz (62.7 fps wall-clock);
-  source 320x240 at 18.9 fps, LIVE PASSTHROUGH on the panel`.
+  `make pass-hw` → `PASS: passthrough emitting 320x240 in 371x260 at 62.2 Hz (62.2 fps wall-clock);
+  source 320x240 at 37.3 fps, LIVE PASSTHROUGH on the panel`. Flashed persistently, so it boots
+  straight into the passthrough with the backlight on and needs no host at all.
   `src/targets/passthrough/` composes Phase 1's capture path into Phase 3's driver path,
   with the runtime mux selecting {mock→LCD} or {live HP Prime capture→LCD} in one bitstream.
 
@@ -109,14 +113,15 @@ is the reference implementation; later phases copy this pattern rather than rein
   frame store in SDRAM does the retiming; buffers exchange at the *panel's* frame boundary so no
   frame tears. Combined SDRAM load is 3.84 MW/s of ~10.8 MW/s, so no burst mode is needed.
 
-  **Correction, measured at the bench: two buffers do NOT suffice to capture every frame.** The
-  original claim — that the panel (62.2 Hz) being strictly faster than the calculator (37.7 Hz)
-  makes two enough — is subtly wrong. Reader-faster-than-writer guarantees a completed capture is
-  *collected* in time; it does not make a buffer *available* at the instant the writer needs one.
-  `ev_done` coincides with the next source frame's start, and at that moment one buffer holds the
-  just-finished capture awaiting the panel swap while the other is being displayed, so the writer
-  skips that frame and re-arms at the following one. Result: **18.9 fps captured against 37.7 Hz,
-  exactly half.** A third buffer fixes it and the SDRAM has ample room (8 MB; 150 KB per buffer).
+  **It is a TRIPLE buffer, and the two-buffer version it shipped with is the most instructive bug in
+  the project.** The original claim — that the panel (62.2 Hz) being strictly faster than the
+  calculator (37.7 Hz) makes two enough — is subtly wrong. Reader-faster-than-writer guarantees a
+  completed capture is *collected* in time; it does not make a buffer *available* at the instant the
+  writer needs one. `ev_done` coincides with the next source frame's start, and at that moment one
+  buffer holds the just-finished capture awaiting the panel swap while the other is being displayed,
+  so the writer skipped that frame: **18.9 fps captured against 37.7 Hz, exactly half.** With three
+  buffers the writer always has somewhere to go and never stops. Measured after the fix: **37.4 fps,
+  every frame.**
 
   Two things about how this was found. It was caught **only** by timing the FPGA's own frame counter
   against host wall-clock — its internal view is perfectly self-consistent at 18.9 — which is the

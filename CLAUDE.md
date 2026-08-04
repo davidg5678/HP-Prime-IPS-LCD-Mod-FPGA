@@ -8,10 +8,12 @@ Prime's live screen on the replacement panel in real time, entirely inside the F
 first hardware attempt.** See `PROGRESS.md` for current status before assuming anything below has
 actually been run/verified this session.
 
-Known limitation, measured not assumed: the passthrough captures every **other** source frame
-(18.9 fps against the Prime's 37.7 Hz) because two frame buffers cannot free one at the instant the
-writer needs it. A third buffer fixes it; the SDRAM has room. Not visible as flicker — the panel
-still refreshes at 62.2 Hz.
+The passthrough runs at the **full 37.7 Hz** source rate into a 62.2 Hz panel, via a **triple**
+buffer in SDRAM. It shipped with two buffers and captured every *other* frame (18.9 fps): two
+buffers cannot free one at the instant the writer needs it, because `ev_done` lands on the same
+clock as the next `src_frame_start`. Caught on hardware by timing the FPGA's own counter against
+host wall-clock; now reproduced in `sim/targets/passthrough_slow`, which exists because the other
+testbench runs the source *faster* than the panel and structurally cannot see it.
 
 **The calculator's LCD bus is reverse-engineered and fully specified in
 `docs/prime_lcd_protocol.md`** — 320×240, 8-bit serial RGB, 3 DOTCLKs per pixel, component order
@@ -38,7 +40,8 @@ editing.
 | Action | Command |
 |---|---|
 | Environment self-check | `make check-env` |
-| Simulate (default target `bringup_uart_loopback`) | `make sim` or `make sim SIM_TARGET=<name>` |
+| Simulate — fast inner loop (Verilator) | `make simq SIM_TARGET=<name>` — **19x faster**, same PASS/FAIL contract |
+| Simulate — reference/signoff (Icarus) | `make sim` or `make sim SIM_TARGET=<name>` |
 | Phase 1 capture over USB serial | `make capture-hw` (add `VCD=captures/x.vcd`) |
 | Headless synth+PnR+bitstream (Gowin, primary) | `make build` or `make build BUILD_TARGET=<name>` |
 | Open-source lint/build sanity check | `make build-oss` |
@@ -76,6 +79,14 @@ Phase 4 work.
   missing the `R` — already fixed in `HP_PRIME_LCD.gprj`). `HP_PRIME_LCD.gprj` is
   GUI-only/best-effort; the headless build scripts generate their own self-contained `.tcl` and
   don't read it.
+
+## Starting a new FPGA project? Read `docs/fpga_project_playbook.md`
+
+A **board- and vendor-agnostic** distillation of everything this repo learned: repo layout, the
+PASS/FAIL contract, the two-simulator strategy, the runtime-mux convention, build gating, telemetry
+design, the classes of board trap that cost time here, and how to work with an agent on hardware.
+Written to be copied into a new repo as a starting point. `docs/verification.md` below is the
+project-specific version of the same argument.
 
 ## Verification comes first — read `docs/verification.md`
 

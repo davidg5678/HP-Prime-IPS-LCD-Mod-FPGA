@@ -26,7 +26,7 @@
 // So the frame must be captured, buffered, and re-emitted on independently
 // generated panel-legal timing. See docs/prime_lcd_protocol.md and
 // docs/panel_afy320240a0.md. The rate mismatch is not incidental -- it is what
-// forces the double buffer below.
+// forces the buffering scheme below.
 //
 // ---------------------------------------------------------------------------
 // RATE BUDGET (this is what makes a single-word SDRAM controller sufficient)
@@ -41,24 +41,59 @@
 // the bottleneck.
 //
 // ---------------------------------------------------------------------------
-// DOUBLE BUFFERING, and the assumption it rests on
+// TRIPLE BUFFERING, and the two-buffer version that did not work
 // ---------------------------------------------------------------------------
-// The writer fills `wbuf`, the panel reads `rbuf`, and they are never the same.
-// Buffers exchange at the PANEL's frame boundary, so the panel never sees a
-// frame torn mid-scan.
+// Three roles, one buffer each, never the same buffer twice:
 //
-// Two buffers suffice only because the reader is strictly FASTER than the
-// writer (62.2 Hz against 37.7 Hz): the panel always finishes a frame before
-// the calculator finishes the next one, so a completed capture is always
-// collected before the writer needs the buffer back. Were the panel slower,
-// this would need three buffers. The invariant that encodes it -- `wr_active`
-// and `wdone` are never both set -- is asserted continuously in
-// sim/targets/passthrough, because it is the thing that makes the swap logic
-// race-free rather than merely usually-right.
+//     rbuf   being scanned out to the panel
+//     wbuf   being filled from the calculator
+//     dbuf   complete, waiting for the panel's next frame boundary
+//            (meaningful only while `have_done`)
 //
-// Frames are DROPPED, not queued, when the calculator outruns the swap. That is
-// correct for a display: showing the newest complete frame is the goal, and
-// 37.7 Hz into 62.2 Hz means some frames are shown twice regardless.
+// Buffers move at two independent events. At the PANEL's frame boundary the
+// pending frame is promoted to the reader, so the panel never sees a frame torn
+// mid-scan. At the SOURCE's frame boundary the just-filled buffer becomes
+// pending and the writer immediately continues into a freed one.
+//
+// WHY NOT TWO. This design shipped with two buffers and the argument that they
+// sufficed "because the reader is strictly faster than the writer (62.2 Hz
+// against 37.7 Hz), so a completed capture is always collected before the
+// writer needs the buffer back". That is true and insufficient, and the gap
+// between those is worth stating exactly:
+//
+//     reader-faster-than-writer guarantees a completed capture is COLLECTED
+//     before it would be overwritten. It does NOT guarantee a buffer is
+//     AVAILABLE at the instant the writer wants one.
+//
+// The writer wants one at `src_frame_start`, which is the same clock on which
+// the previous capture completes. At that moment one buffer holds the
+// just-finished frame awaiting the panel swap (which cannot have happened yet)
+// and the other is on screen. With two buffers there is nowhere to write, so
+// that entire source frame is skipped and the writer re-arms one frame later.
+//
+// Measured on hardware: 18.9 fps captured against the Prime's 37.70 Hz --
+// exactly half. It was invisible to every internal cross-check, because the
+// design was perfectly self-consistent about the frames it did capture; only
+// timing the counter against the HOST's wall clock exposed it
+// (python/tools/passthrough.py). And simulation could not have found it either:
+// sim/targets/passthrough runs the source FASTER than the panel, the inverse
+// regime, where the writer is not trying to start a frame every 26.5 ms in the
+// first place. sim/targets/passthrough_slow exists solely to close that gap and
+// reproduces the 50% loss in ~30 seconds.
+//
+// With three buffers `wr_active` never clears once armed -- the writer runs
+// continuously and every source frame is captured.
+//
+// The old invariant (`wr_active` and `wdone` never both set) is gone with the
+// two-buffer scheme it described. The one that replaces it is stronger and is
+// asserted continuously in both testbenches: **rbuf, wbuf and (while pending)
+// dbuf are always three distinct buffers.** If that ever fails, the panel is
+// scanning a buffer someone is writing.
+//
+// Frames are still DROPPED rather than queued when two captures complete
+// between panel frames: `dbuf` is overwritten by the newer one. That is correct
+// for a display -- showing the freshest complete frame is the goal -- and at
+// 37.7 Hz into 62.2 Hz it cannot arise anyway.
 //
 // ---------------------------------------------------------------------------
 // AUTO / MOCK / REAL, and why the default is not MOCK here
@@ -139,25 +174,39 @@
 //
 module passthrough_top #(
     parameter integer BL_DELAY_CYCLES = 27_000_000,   // 250 ms at 108 MHz
-    // BACKLIGHT OFF AT RESET -- do not "helpfully" raise this. Measured on
-    // hardware during Phase 3 (PROGRESS.md 2026-08-04), from both directions:
+    // THIS MUST BE 0 OR 255. NEVER ANYTHING BETWEEN.
     //
-    //   * PWM DIMMING DOES NOT WORK ON THIS BOARD. The pin drives the LP3320's
-    //     ENABLE, not a dimming input. At ~1 kHz and 25% duty the 250 us
-    //     on-time is shorter than the converter's soft-start, so it never
-    //     reaches regulation: the panel stays DARK while the status report says
-    //     the backlight is ON. That is the worst possible combination, and an
-    //     earlier version of this file shipped exactly it (BL_DUTY_INIT = 64).
-    //     BL = 255 (99.6%, effectively static) is the working setting.
+    // PWM DIMMING DOES NOT WORK ON THIS BOARD -- measured on hardware during
+    // Phase 3, from both directions (PROGRESS.md 2026-08-04). The pin drives
+    // the LP3320's ENABLE, not a dimming input. At ~1 kHz and 25% duty the
+    // 250 us on-time is shorter than the converter's soft-start, so it never
+    // reaches regulation: the panel stays DARK while the status report says the
+    // backlight is ON. That is the worst possible combination -- a fault that
+    // presents as working telemetry -- and an earlier version of this file
+    // shipped exactly it (BL_DUTY_INIT = 64). 255 is 99.6% duty, i.e. a static
+    // enable, which is the only setting that actually lights the panel.
     //
-    //   * WITH NO PANEL MATED the boost drives an open circuit at maximum. Its
-    //     feedback comes from R31 in series with the PANEL's LED string, so
-    //     with no LED current FB never reaches threshold. A display driver must
-    //     not enable a boost into a load it cannot detect, and nothing on the
-    //     40-pin connector reports back.
+    // WHY 255 HERE, WHERE src/targets/lcd_panel SHIPS 0. lcd_panel is a bench
+    // tool: panels come and go, and enabling a boost into a load you cannot
+    // detect is the wrong default when the load may be absent. (Nothing on the
+    // 40-pin connector reports back, and the LP3320's feedback comes from R31
+    // in series with the PANEL's LED string, so with no panel FB never reaches
+    // threshold and the converter drives an open circuit at maximum.)
     //
-    // So the backlight is opt-in, exactly as src/targets/lcd_panel ships it.
-    parameter [7:0]   BL_DUTY_INIT    = 8'd0
+    // Phase 4 is not a bench tool. It is a standalone box with a panel
+    // permanently mated, flashed to boot straight into the passthrough, and a
+    // default of 0 means it powers up DARK and needs a computer to light it --
+    // which defeats the entire point. Crucially this is not a new risk either:
+    // pin 49 has a 27k pull-up to +3V3 on the board, so EVERY bitstream that
+    // does not actively drive it leaves the boost enabled anyway, including
+    // la_capture, frame_capture and an unconfigured FPGA. "Boost on" is the
+    // board's resting state; this just reaches it deliberately, and 250 ms
+    // after video starts, which is the panel's T2 requirement.
+    //
+    // The panel wants 19.2 V at 40 mA, absolute max 50 mA. Measure before
+    // leaving it running continuously; the datasheet is explicit that
+    // over-driving shortens LED life.
+    parameter [7:0]   BL_DUTY_INIT    = 8'd255
 ) (
     input  wire        clk,       // pin 4, 27 MHz
     input  wire        uart_rx,   // pin 70
@@ -312,17 +361,47 @@ module passthrough_top #(
         .frame_tick(tg_frame)
     );
 
+    // test_pattern is fenced by registers on BOTH sides -- see the note at the
+    // pixel mux for why, and why two cycles of latency cost nothing here.
+    // Registering only the output left the counter->pattern half still setting
+    // Fmax at 108.677 MHz against a 108 MHz constraint: passing, but 0.6% on a
+    // design measured to vary ~3% run to run, which is luck rather than margin.
+    reg [9:0] pat_x, pat_y;
+    always @(posedge clk_s or negedge rst_n) begin
+        if (!rst_n) begin
+            pat_x <= 10'd0; pat_y <= 10'd0;
+        end else begin
+            pat_x <= tg_nxt_x; pat_y <= tg_nxt_y;
+        end
+    end
+
     wire [4:0] pat_r, pat_b;
     wire [5:0] pat_g;
     test_pattern u_pat (
-        .x(tg_nxt_x), .y(tg_nxt_y), .sel(pattern),
+        .x(pat_x), .y(pat_y), .sel(pattern),
         .r(pat_r), .g(pat_g), .b(pat_b)
     );
 
     // ======================================================== frame buffers
-    reg wbuf, rbuf, wdone, wr_active;
-    wire [20:0] wbase = wbuf ? BUF_STRIDE : 21'd0;
-    wire [20:0] rbase = rbuf ? BUF_STRIDE : 21'd0;
+    reg [1:0] wbuf, rbuf, dbuf;
+    reg       have_done, wr_active;
+
+    // Buffer n starts at n * BUF_STRIDE = n * 2^19, which is just a
+    // concatenation. The address map is {bank[1:0], row[10:0], col[7:0]}
+    // (docs/sdram.md), so this puts each buffer in its OWN BANK -- 0, 1 and 2 --
+    // rather than in distant rows of one bank. Irrelevant to today's
+    // single-word controller, where every access already pays a full
+    // activate/precharge, but it is the layout an open-row or burst policy would
+    // need, and it costs nothing now. Highest address used is
+    // 2*2^19 + 38,399 = 1,086,975, well inside the 21-bit space.
+    wire [20:0] wbase = {wbuf, 19'd0};
+    wire [20:0] rbase = {rbuf, 19'd0};
+
+    // The buffer in none of the three roles. Valid whenever rbuf != wbuf, which
+    // the distinctness invariant guarantees: 0 + 1 + 2 = 3, so the missing index
+    // is 3 minus the other two. Used only when no frame is pending -- when one
+    // is, `dbuf` is the buffer being recycled and this would name it anyway.
+    wire [1:0] free_buf = 2'd3 - rbuf - wbuf;
 
     // Address of the word holding pixel (x,y): y * 160 + x/2. Written as two
     // shifts and an add rather than a multiply -- 160 = 128 + 32 -- so this
@@ -390,18 +469,17 @@ module passthrough_top #(
     wire [15:0] live_pix = rd_half ? rd_word[31:16] : rd_word[15:0];
     wire        want_pix = tg_tick && tg_nxt_de;
 
-    // ---- swap and capture-arm events.
+    // ---- the two buffer-movement events.
     //
-    // These are mutually exclusive by construction, and the design depends on
-    // it: `wr_active` implies `!wdone` (a capture only arms when no completed
-    // frame is waiting, and wdone is only set as wr_active is cleared), so
-    // ev_swap -- which needs wdone -- cannot coincide with ev_done, which needs
-    // wr_active. Without that invariant the two would fight over `wdone` in the
-    // same cycle and the later non-blocking assignment would silently win.
-    // sim/targets/passthrough asserts the invariant on every clock.
-    wire ev_swap = tg_frame && wdone;
-    wire ev_done = src_frame_start && wr_active;
-    wire ev_arm  = src_frame_start && !wr_active && !wdone;
+    // Unlike the two-buffer version these are NOT mutually exclusive: the panel
+    // and the calculator are asynchronous, so a source frame can complete on the
+    // same clock the panel starts a new frame. That case is handled explicitly
+    // below as a three-way rotation rather than being argued away -- the old
+    // design's correctness rested on the two never coinciding, and relying on
+    // that again with three buffers would be relying on something no longer
+    // true.
+    wire ev_done = src_frame_start && wr_active;   // a capture just finished
+    wire ev_show = tg_frame && have_done;          // promote pending -> reader
 
     always @(posedge clk_s or negedge rst_n) begin
         if (!rst_n) begin
@@ -410,7 +488,11 @@ module passthrough_top #(
             fetch_idx <= 21'd0; rd_pending <= 1'b0; rd_discard <= 1'b0;
             rd_word <= 32'd0; rd_loaded <= 1'b0; rd_half <= 1'b0;
             sd_req <= 1'b0; sd_we <= 1'b0; sd_addr <= 21'd0; sd_wdata <= 32'd0;
-            wbuf <= 1'b0; rbuf <= 1'b1; wdone <= 1'b0; wr_active <= 1'b0;
+            // Three distinct buffers from the very first cycle -- the
+            // distinctness invariant must hold at reset too, not just once
+            // the first frame arrives.
+            rbuf <= 2'd0; wbuf <= 2'd1; dbuf <= 2'd2;
+            have_done <= 1'b0; wr_active <= 1'b0;
             wr_overrun <= 1'b0; rd_underrun <= 1'b0;
             even_pix <= 16'd0; src_frames <= 16'd0; have_frame <= 1'b0;
         end else if (do_reset) begin
@@ -418,30 +500,61 @@ module passthrough_top #(
             rf_wr <= 5'd0; rf_rd <= 5'd0;
             fetch_idx <= 21'd0; rd_discard <= rd_pending;
             rd_loaded <= 1'b0; rd_half <= 1'b0;
-            wbuf <= 1'b0; rbuf <= 1'b1; wdone <= 1'b0; wr_active <= 1'b0;
+            // Three distinct buffers from the very first cycle -- the
+            // distinctness invariant must hold at reset too, not just once
+            // the first frame arrives.
+            rbuf <= 2'd0; wbuf <= 2'd1; dbuf <= 2'd2;
+            have_done <= 1'b0; wr_active <= 1'b0;
             wr_overrun <= 1'b0; rd_underrun <= 1'b0;
             src_frames <= 16'd0; have_frame <= 1'b0;
         end else begin
-            // ---------------------------------------------------- buffer swap
-            if (ev_swap) begin
-                rbuf  <= wbuf;
-                wbuf  <= ~wbuf;
-                wdone <= 1'b0;
-                // Sticky: from here on the reader's buffer holds a COMPLETE
-                // captured frame. This is what AUTO waits for -- not
-                // src_frames, which counts frames the writer has FINISHED, one
-                // of which may still be sitting unswapped in wbuf. Switching
-                // the mux on src_frames would present a buffer the panel has
-                // not been given yet.
-                have_frame <= 1'b1;
+            // ------------------------------------------------ buffer movement
+            //
+            // Three cases, and the first is the one the two-buffer design could
+            // not have: both events on the same clock. The rotation
+            // rbuf<-dbuf<-wbuf<-rbuf handles it in one step -- the pending frame
+            // goes on screen, the just-finished one becomes pending, and the
+            // buffer the panel has just stopped reading becomes the write
+            // target. No buffer is ever in two roles, and nothing is dropped.
+            if (ev_done && ev_show) begin
+                rbuf <= dbuf;
+                dbuf <= wbuf;
+                wbuf <= rbuf;
+            end else if (ev_done) begin
+                // A capture finished with no swap this cycle. It becomes the
+                // pending frame. The writer continues into whichever buffer is
+                // now free: if a frame was ALREADY pending it is superseded and
+                // its buffer recycled (show the freshest); otherwise the
+                // untouched third one.
+                dbuf <= wbuf;
+                wbuf <= have_done ? dbuf : free_buf;
+            end else if (ev_show) begin
+                // Promote pending to the reader. The buffer the panel was
+                // scanning becomes free, which free_buf will name from now on.
+                rbuf <= dbuf;
             end
-            if (ev_done) begin
-                wdone      <= 1'b1;
-                wr_active  <= 1'b0;
-                src_frames <= src_frames + 16'd1;
-            end else if (ev_arm) begin
-                wr_active <= 1'b1;
-            end
+
+            // `have_done` is set by ev_done and cleared by ev_show, and when
+            // both fire it must end up SET -- a new frame took the departing
+            // one's place. Writing it once here rather than inside the branches
+            // above is what makes that unambiguous; two branches assigning it in
+            // the same cycle is exactly the silent-last-assignment-wins bug the
+            // old comment warned about.
+            if (ev_done)      have_done <= 1'b1;
+            else if (ev_show) have_done <= 1'b0;
+
+            if (ev_done) src_frames <= src_frames + 16'd1;
+
+            // Sticky: a captured frame has reached the READER. This is what
+            // AUTO waits for -- not src_frames, which counts frames the writer
+            // has finished, one of which may still be pending in dbuf.
+            if (ev_show) have_frame <= 1'b1;
+
+            // Armed by the first source frame boundary and never cleared: with
+            // three buffers the writer always has somewhere to go, so it runs
+            // continuously and no source frame is skipped. On the two-buffer
+            // design this cleared at ev_done and cost every other frame.
+            if (src_frame_start) wr_active <= 1'b1;
 
             // ------------------------------------------------ writer: pack
             if (pix_valid && wr_active) begin
@@ -564,7 +677,40 @@ module passthrough_top #(
     end
 
     // ------------------------------------------------------ pixel mux + pins
-    wire [15:0] mock_pix = {pat_r, pat_g, pat_b};
+    //
+    // test_pattern's output is REGISTERED, and this is a timing fix rather than
+    // a functional one.
+    //
+    // Unpipelined, the critical path of the entire design ran from the timing
+    // generator's horizontal counter, through test_pattern's combinational
+    // GRID/BARS/PLAID logic, into the output pixel register -- all in one
+    // 9.26 ns cycle. That path set Fmax for everything, and it is DIAGNOSTIC
+    // SCAFFOLDING: it exists to put a test image on the glass, and it was
+    // limiting the passthrough. Adding the third frame buffer pushed it over,
+    // and the build gate failed with 3 violated setup endpoints at 105.2 MHz
+    // against a 108 MHz constraint -- all three of them this path.
+    //
+    // A register stage is free here because the consumer is slow: the pattern
+    // is sampled only on `tg_tick`, one cycle in eighteen at 6 MHz. It is also
+    // SAFE here for a specific reason worth stating rather than assuming --
+    // `tick` is a one-cycle pulse at the last phase and `nxt_x`/`nxt_y` change
+    // only just after it, so they are stable for the whole 17 cycles preceding
+    // the tick. The registered copy therefore holds exactly the combinational
+    // value at every tick, and no pixel shifts. If that reasoning were wrong the
+    // symptom would be a one-pixel offset, which is precisely what
+    // sim/targets/passthrough's 76,800-pixel comparison against the GRID oracle
+    // is there to catch.
+    reg [4:0] pat_r_q, pat_b_q;
+    reg [5:0] pat_g_q;
+    always @(posedge clk_s or negedge rst_n) begin
+        if (!rst_n) begin
+            pat_r_q <= 5'd0; pat_g_q <= 6'd0; pat_b_q <= 5'd0;
+        end else begin
+            pat_r_q <= pat_r; pat_g_q <= pat_g; pat_b_q <= pat_b;
+        end
+    end
+
+    wire [15:0] mock_pix = {pat_r_q, pat_g_q, pat_b_q};
     wire [15:0] real_pix = rd_loaded ? live_pix : 16'h0000;
     wire [15:0] src_pix  = mode_real ? real_pix : mock_pix;
 

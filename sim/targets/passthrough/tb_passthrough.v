@@ -104,7 +104,7 @@ module tb_passthrough;
         .O_sdram_addr(sd_addr), .O_sdram_ba(sd_ba), .IO_sdram_dq(sd_dq)
     );
 
-    // ROWS shrunk from 2048 to 256: a frame is 150 rows and the two buffers sit
+    // ROWS shrunk from 2048 to 256: a frame is 150 rows and the three buffers sit
     // in different BANKS, so nothing above row 149 is ever touched. This keeps
     // the model's storage array at 1 MB instead of 8 MB.
     sdram_sim #(.ROWS(256)) u_mem (
@@ -122,17 +122,27 @@ module tb_passthrough;
     endtask
 
     // =======================================================================
-    // THE INVARIANT THE SWAP LOGIC RESTS ON
+    // THE INVARIANT THE BUFFERING RESTS ON
     //
-    // passthrough_top argues that ev_swap and ev_done can never coincide,
-    // because wr_active implies !wdone. If that were ever false the two would
-    // assign `wdone` in the same cycle and the later non-blocking assignment
-    // would silently win, presenting a stale buffer. Checked on every clock
-    // rather than reasoned about once.
+    // rbuf, wbuf and (while a frame is pending) dbuf must always be three
+    // DISTINCT buffers. If that ever fails the panel is scanning out a buffer
+    // something else is writing, and the symptom would be intermittent tearing
+    // that no single-frame pixel check could reliably catch.
+    //
+    // This replaced the two-buffer invariant ("wr_active and wdone never both
+    // set"), which was retired along with the scheme it described -- and which,
+    // note, held perfectly right up to the moment hardware showed the design was
+    // dropping half its frames. A true invariant is not the same thing as a
+    // sufficient one.
     // =======================================================================
     reg invariant_bad = 1'b0;
     always @(posedge dut.clk_s) begin
-        if (dut.rst_n && dut.wr_active && dut.wdone) invariant_bad = 1'b1;
+        if (dut.rst_n) begin
+            if (dut.rbuf === dut.wbuf) invariant_bad = 1'b1;
+            if (dut.have_done &&
+                (dut.dbuf === dut.rbuf || dut.dbuf === dut.wbuf))
+                invariant_bad = 1'b1;
+        end
     end
 
     // =======================================================================
@@ -394,14 +404,26 @@ module tb_passthrough;
         chk_i("have_frame bit",           (rpt[5] >> 2) & 1,  1);
 
         // The SHIPPED backlight default, read back off the wire rather than
-        // asserted about the source. It must be 0: PWM dimming does not work on
-        // this board (the pin is the LP3320's ENABLE and 25% duty never clears
-        // soft-start), so any nonzero-but-not-255 default produces a dark panel
-        // while this very report claims the backlight is on. The testbench
-        // overrides BL_DELAY_CYCLES for runtime but deliberately does NOT
-        // override BL_DUTY_INIT, so this checks what hardware will get.
-        chk_i("shipped backlight duty", rpt[4], 0);
-        chk_i("backlight-on bit",      (rpt[2] >> 3) & 1, 0);
+        // asserted about the source. The testbench overrides BL_DELAY_CYCLES so
+        // the simulation can afford it, but deliberately does NOT override
+        // BL_DUTY_INIT -- so this is what real hardware will come up with.
+        //
+        // The value must be 255 (a static enable, so the box lights itself) and
+        // the interesting part is what it must NOT be. PWM dimming does not
+        // work on this board: the pin is the LP3320's ENABLE, and any duty
+        // between 1 and 254 gives an on-time shorter than the converter's
+        // soft-start, so the panel stays DARK while the report below claims the
+        // backlight is ON. A fault that presents as working telemetry is the
+        // worst kind, and this file previously shipped one (64). The
+        // out-of-range check is therefore the load-bearing assertion here --
+        // the exact-value check merely pins today's choice.
+        chk_i("shipped backlight duty", rpt[4], 255);
+        if (rpt[4] != 0 && rpt[4] != 255) begin
+            $display("FAIL: BL_DUTY_INIT = %0d is in the forbidden 1..254 range -- PWM dimming does not work on this board, so this ships a dark panel that reports itself lit",
+                     rpt[4]);
+            errors = errors + 1;
+        end else $display("  ok  backlight duty is not an unreachable PWM value");
+        chk_i("backlight-on bit",      (rpt[2] >> 3) & 1, 1);
         chk_i("reported DCLKs per line",  rpt16(6),  EXP_H_TOTAL);
         chk_i("reported active DCLKs",    rpt16(8),  EXP_H_ACTIVE);
         chk_i("reported lines per frame", rpt16(10), EXP_V_TOTAL);
@@ -468,10 +490,10 @@ module tb_passthrough;
         chk_i("requested mode back to AUTO", rpt[5] & 3, MODE_AUTO);
 
         if (invariant_bad) begin
-            $display("FAIL: wr_active and wdone were set simultaneously -- the swap logic's mutual-exclusion invariant does not hold");
+            $display("FAIL: rbuf/wbuf/dbuf were not three distinct buffers -- the panel was scanning a buffer something else owned");
             errors = errors + 1;
         end else
-            $display("  ok  wr_active/wdone stayed mutually exclusive throughout");
+            $display("  ok  rbuf/wbuf/dbuf stayed distinct throughout");
 
         if (errors != 0) begin
             $display("FAIL: %0d checks failed", errors);

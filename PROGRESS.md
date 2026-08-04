@@ -3,6 +3,130 @@
 Update this file at the end of each work session so a future session (human or agent) can
 pick up cold. Newest entries at the top.
 
+## 2026-08-04 (part 3) — full frame rate, a 19x faster sim loop, and an FPGA playbook
+
+**Status: the standalone box is finished. Flashed, boots into the live passthrough by itself with
+the backlight on, at the FULL source rate.** `make pass-hw` →
+`PASS: passthrough emitting 320x240 in 371x260 at 62.2 Hz (62.2 fps wall-clock); source 320x240 at
+37.3 fps, LIVE PASSTHROUGH on the panel`. New: `make simq` (Verilator), `sim/targets/passthrough_slow`,
+`docs/fpga_project_playbook.md`, triple buffering.
+
+### Verilator: the inner loop got 19x faster, for free
+
+`verilator --binary --timing` compiled `tb_passthrough` **first try**, no source changes, only
+`-Wno-fatal` to get past pre-existing lint warnings. `#delay`, `fork`/`join`, `wait()`, hierarchical
+`dut.x` references, the tristate SDRAM bus and `$fatal(1)` all worked.
+
+```
+iverilog + vvp        4 m 29 s
+verilator --binary        14 s      <- identical verdict, 47/47 checks
+```
+
+`make simq` is the new inner loop; **`make sim` keeps its meaning unchanged** as the reference. Both
+are kept deliberately, for the reason `CLAUDE.md` already gives about iverilog vs GowinSynthesis:
+independent tools disagree about what legal Verilog is, so their *agreement* is evidence. Same
+argument as `make build-oss`.
+
+This single change is what made everything below affordable — the slow-regime testbench that found
+the buffering bug is 350 ms of simulated time, which is minutes under Icarus and seconds under
+Verilator.
+
+### The verification gap closed, then the bug fixed
+
+`sim/targets/passthrough_slow` runs the source at the Prime's **real frame rate** (1361 DOTCLKs ×
+259 lines = 26.53 ms = 37.70 Hz) with reduced active height — the opposite trade from the sibling
+testbench, which keeps real line timing but ends up running the source ~5x FASTER than the panel.
+
+Written to assert the behaviour **wanted**, not the behaviour produced, so it failed first:
+
+```
+source emitted 6 frames, DUT captured 3
+FAIL: captured 3 of 6 source frames (50.0%)
+```
+
+That is the hardware bug, reproduced in 33 seconds, having previously needed a calculator, a panel
+and a host wall-clock to notice.
+
+**Fixed with a third buffer.** Three roles — `rbuf` on screen, `wbuf` filling, `dbuf` complete and
+pending — with a three-way rotation when both frame boundaries land on the same clock, which the
+two-buffer design could prove impossible and this one cannot. `wr_active` now never clears once
+armed: the writer always has somewhere to go.
+
+Measured on hardware: **18.9 fps → 37.4 fps.** Every source frame captured.
+
+The old invariant (`wr_active` and `wdone` never both set) was retired with the scheme it described.
+Worth noting it **held perfectly** right up to the moment hardware showed half the frames were being
+dropped — a true invariant is not the same as a sufficient one. Its replacement is stronger:
+`rbuf`, `wbuf` and (while pending) `dbuf` are always three distinct buffers, asserted every clock in
+both testbenches.
+
+### The timing margin was luck, and the build gate proved it
+
+Adding the third buffer **failed the build**: 3 violated setup endpoints, Fmax 105.2 MHz against a
+108 MHz constraint. All three violations were the path flagged in part 2 — the horizontal counter
+through `test_pattern`'s combinational logic into the output register. Diagnostic scaffolding was
+setting Fmax for the whole design.
+
+Fixed by fencing `test_pattern` with registers on **both** sides. Free, because its output is
+sampled only on `tg_tick`, one cycle in eighteen; and safe for a reason worth stating rather than
+assuming — `tick` is a one-cycle pulse at the last phase and `nxt_x`/`nxt_y` change only just after
+it, so they are stable for the 17 cycles preceding every tick.
+
+```
+two buffers, no pipeline     108.423 MHz    (36 ps -- placement noise)
+three buffers, no pipeline   105.172 MHz    BUILD FAIL, 3 violations
+three buffers, output reg    108.677 MHz    passes, 0.6% margin -- still luck
+three buffers, both sides    117.721 MHz    9% margin, logic depth 8 -> 6
+```
+
+Registering only the output was not enough: it split the path but left the counter→pattern half
+still setting Fmax. **`make build`'s timing gate is the only reason any of this was noticed** — the
+vendor tool exits 0 and writes a bitstream regardless.
+
+### `docs/fpga_project_playbook.md`
+
+A board- and vendor-agnostic distillation of everything this project learned, written to be copied
+into a new repo: layout conventions, the PASS/FAIL contract, the two-simulator strategy, the
+runtime-mux convention and how to choose its power-on default, build gating, telemetry design, the
+classes of board trap that cost time here, debugging discipline, and how to work with an agent on
+hardware. `docs/verification.md` remains the project-specific version of the same argument.
+
+### Backlight: 0 → 255, and why the earlier reasoning was incomplete
+
+Part 2 set `BL_DUTY_INIT = 0` to avoid enabling a boost into a load that cannot be detected. Correct
+for `lcd_panel`, a bench tool where panels come and go — but it meant the flashed box **powered up
+dark and needed a computer to light it**, defeating the point.
+
+The step missed the first time: **pin 49 has a 27 kΩ pull-up, so the boost is already enabled by
+every bitstream that does not drive that pin**, including an unconfigured FPGA. "Boost on" is the
+board's resting state; 255 just reaches it deliberately, and 250 ms after video starts per the
+panel's T2. Now `8'd255`, and the testbench asserts the shipped value is never in the **forbidden
+1..254 range** — the range that produces a dark panel reporting itself lit.
+
+### Three testbench bugs, all one class
+
+All three were **comparing quantities that live on different time bases**, and all three produced
+failures while the RTL was correct:
+
+1. `dut.mode_real` point-sampled after a pin-observed frame count — internal state changes cycles
+   before the pins show it. Fixed by accumulating over the window the pins define.
+2. A pixel-check window opened mid-frame and closed at the next VSYNC, so it could land entirely in
+   blanking: `0 pixels checked` while everything else passed. Fixed by aligning to a boundary first.
+3. Source-frame counters compared across the sampler's lag, giving `7 of 6` and then `6 of 5` —
+   *opposite* directions, the signature of a window straddling a boundary. Fixed by reading both
+   counters 1 ms after a boundary, far outside the lag and far inside a frame.
+
+### Open
+
+- The **two-buffer** rate limitation is fixed; nothing known is outstanding on the passthrough.
+- `sim/targets/passthrough` still runs the source faster than the panel. That is now a deliberate
+  division of labour with `passthrough_slow` rather than an oversight, and both are documented as
+  such — but note that neither runs a *full-height* source, so the writer still only addresses
+  `y < 8`.
+- The RGB LED cannot be silenced (pin 79 is `probe[8]`); the LED row defaults on where `lcd_panel`
+  defaults off. Both cosmetic.
+- `python/tools/lcd_panel.py`'s docstring still claims 25% PWM default — stale since Phase 3.
+
 ## 2026-08-04 (part 2) — PHASE 4 COMPLETE: the HP Prime's screen is live on the replacement panel
 
 **Status: the passthrough works on hardware, first attempt, no debugging session. The calculator's
