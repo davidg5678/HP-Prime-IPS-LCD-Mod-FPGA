@@ -86,9 +86,27 @@ main risk — now quantified rather than anticipated.
 
 ### Timing recipe for the FPGA output
 
-Derived from the Parallel 24-bit RGB Input Timing Table, using the typical column. Note that the
-back-porch figures include the sync pulse width — that is the only reading under which the parts
-sum to the quoted totals:
+**Implemented in `src/common/lcd_timing_gen.v` and verified against these numbers in
+`sim/targets/lcd_timing_gen/`.**
+
+The full Parallel 24-bit RGB Input Timing Table, typical column. **The AC tables are IMAGES in the
+PDF** — `pdftotext` returns nothing for them, so these were read visually from pages 10–13. An
+earlier version of this section derived the porches from the totals and did not carry the two pulse
+widths:
+
+| | Symbol | Min | Typ | Max | Unit |
+|---|---|---|---|---|---|
+| DCLK frequency | Fclk | 5 | **6** | 8 | MHz |
+| Line period | Th | 325 | **371** | 438 | DCLK |
+| Active | Thdisp | | **320** | | DCLK |
+| Back porch | Thbp | 3 | **43** | 43 | DCLK |
+| Front porch | Thfp | 2 | **8** | 75 | DCLK |
+| HSYNC pulse | Thw | 2 | **4** | 43 | DCLK |
+| Frame period | Tv | 244 | **260** | 289 | HSYNC |
+| Active | Tvdisp | | **240** | | HSYNC |
+| Back porch | Tvbp | 2 | **12** | 12 | HSYNC |
+| Front porch | Tvfp | 2 | **8** | 37 | HSYNC |
+| VSYNC pulse | Tvw | 2 | **4** | 12 | HSYNC |
 
 ```
 horizontal:  Thbp 43  +  Thdisp 320  +  Thfp 8   =  Th 371 DCLK   (typ 371 ✓)
@@ -98,14 +116,43 @@ at DCLK = 6 MHz:  line = 61.8 us   (spec 55-65 ✓)
                   frame = 16.08 ms = 62.2 Hz   (spec ~58-68 ✓)
 ```
 
+**The sync pulse is nested INSIDE the back porch, not adjacent to it.** The arithmetic above only
+closes under that reading, and the SYNC-mode diagram on p.11 shows it directly: Thbp is drawn from
+the HSYNC falling edge to the start of the display period, with Thw inside it. Same for Tvw inside
+Tvbp. Getting this backwards puts the image 4 pixels off with no other symptom, which is why
+`sim/targets/lcd_timing_gen` asserts the nesting explicitly rather than only checking the totals.
+
 The datasheet is explicit that with default registers these are not free choices:
 
 > It is necessary to keep Tvbp=12 and Thbp=43 in sync mode. DE mode is unnecessary to keep it.
 
 Since we cannot reach the SPI to change `H_BLANKING`/`V_BLANKING`, either supply exactly those
 porches in SYNC mode, or use **DE mode**, where DE alone delimits the active region and the porch
-registers are irrelevant. DE mode is the lower-risk choice; the board wires all three of HSYNC,
-VSYNC and DE, so SYNC-DE mode is available too.
+registers are irrelevant. `lcd_timing_gen` does **both** — it emits the exact default porches *and*
+a correct DE — so the panel is driven legally in SYNC, SYNC-DE or DE mode, whichever it is actually
+in. That costs nothing and removes a failure mode from first light.
+
+### DCLK polarity is unknown, and the design is built not to care
+
+Every figure in the datasheet labels the clock "DCLK (Negative Polarity)", but the figures are
+low-resolution scans and which edge the panel latches on cannot be read off them with confidence.
+Normally you would set DPOL over the SPI — which is exactly what is unreachable here.
+
+Guessing has a catastrophic wrong side: if data changes *at* the sampling edge, every pixel is
+corrupt. So `lcd_timing_gen` transitions data at phase 0 of the 18-cycle DCLK period and places
+DCLK's two edges at phases 4 and 13:
+
+| | setup | hold |
+|---|---|---|
+| falling edge (phase 4) | 37.0 ns | 129.6 ns |
+| rising edge (phase 13) | 120.4 ns | 46.3 ns |
+
+Every setup and hold minimum in the AC table is 12 ns (Tdsu, Tdhd, Thst, Thhd, Tvst, Tvhd, Tdest,
+Tdehd). The worst of the four figures above is 3.1x that, so the design is correct on **either**
+polarity, and duty stays exactly 50% against a 40–60% spec. This is only affordable because 6 MHz
+is slow — one DCLK is 18 system clocks at 108 MHz, so quarter-period granularity is free.
+
+If pixels smear on hardware anyway, `DCLK_FALL` and `DCLK_RISE` are the two parameters to move.
 
 ### Frame buffer: this is what forces the SDRAM
 
@@ -143,11 +190,21 @@ Three things, all optional, none needed to light the panel:
    wired for *resistive* touch (XR/YD/XL/YU), which this panel does not have. Touch is not in the
    phase roadmap.
 
-### Also worth handling in RTL, free
+### Also worth handling in RTL, free — done
 
 The power-on sequence requires `T2 ≥ 250 ms` from display signal output to backlight on. The FPGA
 owns the backlight enable (`LCD_BL`, pin 49), so Phase 3 should hold it off for 250 ms after the
 timing generator starts rather than enabling it at reset.
+
+**Implemented** in `lcd_panel_top` as `BL_DELAY_CYCLES = 27_000_000` (250 ms at 108 MHz), plus a
+~1 kHz PWM on the same pin that comes up at **25% duty** — because the board's boost driver was
+designed for a different panel and starting dim is the cheap direction to be wrong in. The duty is
+settable at runtime over UART (`make lcd-hw BL=<0-255>`). `lcd_panel.cst` also sets
+`PULL_MODE=DOWN` on pin 49, so an unconfigured FPGA cannot light the backlight at all.
+
+The top-level testbench overrides the delay to something a simulation can afford and then
+separately asserts that the *shipped* default is still ≥ 250 ms, so the simulation shortcut cannot
+leak into hardware.
 
 ## Before first power-up — checks
 
@@ -167,3 +224,10 @@ Plug it in. The video path needs no adapter, the resolution is an exact match fo
 the logic levels agree. Accept RGB565, generate panel-legal timing rather than passing the
 Prime's through, keep pin 52 in reserve in case DISP needs driving, and expect the SDRAM
 controller — not Phase 3 RTL — to be the next real piece of work.
+
+**Status (2026-08-03):** the SDRAM controller is done and working on hardware, and the Phase 3
+driver is written and verified in simulation against every number in the AC table above — but has
+**not yet been driven into a physical panel**. `make lcd-hw` checks that the FPGA is emitting
+correct timing; it cannot check that anything is displayed, because nothing on this connector comes
+back to the FPGA. The three checks in the previous section (FFC orientation, backlight current, FFC
+length) are still the ones that need eyes on hardware.

@@ -2,8 +2,11 @@ SIM_TARGET   ?= bringup_uart_loopback
 BUILD_TARGET ?= bringup_selftest
 VCD          ?=
 PPM          ?=
+PATTERN      ?=
+BL           ?=
+LEDS         ?=
 
-.PHONY: sim build build-oss flash flash-sram selftest-hw capture-hw sdram-hw frame-hw stream-hw check-env clean
+.PHONY: sim build build-oss flash flash-sram selftest-hw capture-hw sdram-hw frame-hw stream-hw lcd-hw check-env clean
 
 sim:          ; tools/sim/run_sim.sh $(SIM_TARGET)
 build:        ; tools/build/gowin_build.sh $(BUILD_TARGET)
@@ -26,5 +29,14 @@ frame-hw:     ; python3 python/tools/frame_capture.py $(if $(PORT),--port $(PORT
 # Needs `make flash-sram BUILD_TARGET=frame_stream` first and the probes
 # attached. PPM=captures/live_%d.ppm writes each frame.
 stream-hw:    ; python3 python/tools/frame_stream.py $(if $(PORT),--port $(PORT)) $(if $(PPM),--ppm $(PPM))
+# Phase 3: verify the FPGA is emitting panel-legal RGB timing, and drive the
+# test patterns. Needs `make flash-sram BUILD_TARGET=lcd_panel` first; the panel
+# itself needs no host at all, since the video path is entirely internal.
+#   PATTERN=0..7  select a test image (0 GRID, 1 BARS, 2 RAMPS, 3 PLAID,
+#                 4 WHITE, 5 BLACK, 6 THIRDS, 7 CHECKER)
+#   BL=0..255     backlight PWM duty. Comes up at 64 (25%) deliberately --
+#                 MEASURE THE LED CURRENT before raising it; see
+#                 docs/panel_afy320240a0.md.
+lcd-hw:       ; python3 python/tools/lcd_panel.py $(if $(PORT),--port $(PORT)) $(if $(PATTERN),--pattern $(PATTERN)) $(if $(BL),--backlight $(BL)) $(if $(LEDS),--leds $(LEDS))
 check-env:    ; tools/setup/check_env.sh
 clean:        ; rm -rf impl build_oss sim/.build

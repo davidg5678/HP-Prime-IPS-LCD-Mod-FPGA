@@ -72,20 +72,32 @@ is the reference implementation; later phases copy this pattern rather than rein
   phases. Natural point to introduce cocotb, reusing this same Python decode model as the
   testbench oracle.
 
-- **Phase 3 — physical LCD driver.** Drives the onboard RGB LCD FPC connector (pins documented
-  in `boards/tangnano20k/pinout.md`). Panel is an Orient Display AFY320240A0-3.5INTH-C2, 320x240
-  — an exact resolution match for the Prime. Analysis in `docs/panel_afy320240a0.md`: **no
-  adapter board is needed**, the connectors match on 38 of 40 pins, and the board wires RGB565
-  (the low colour bits are grounded on the PCB, so 24-bit is unreachable by any adapter). Reuses
-  the pattern-generator building block from Phase 1's mock as a synthetic test-image source.
-  **AI-development optimization**: timing-generator correctness is fully checkable in simulation
-  against the datasheet's numeric spec before any physical panel is needed — the target is
-  Th = 371 DCLK, Tv = 260 lines at 6 MHz, and the panel's SPI is unreachable (CS is grounded), so
-  the default-register porch constraints Thbp=43 / Tvbp=12 are hard requirements in SYNC mode.
+- **Phase 3 — physical LCD driver. FPGA side CONFIRMED ON HARDWARE; the panel itself is not yet
+  displaying, blocked on a reversing FFC.** Drives the onboard RGB LCD FPC connector (pins documented in
+  `boards/tangnano20k/pinout.md`). Panel is an Orient Display AFY320240A0-3.5INTH-C2, 320x240 — an
+  exact resolution match for the Prime. Analysis in `docs/panel_afy320240a0.md`: **no adapter board
+  is needed**, the connectors match on 38 of 40 pins, and the board wires RGB565 (the low colour
+  bits are grounded on the PCB, so 24-bit is unreachable by any adapter).
+  `src/targets/lcd_panel/` = `lcd_timing_gen` (Th = 371 DCLK, Tv = 260 lines at 6 MHz) +
+  `test_pattern` (eight diagnostic images) + backlight sequencing + a UART control channel.
+  **The AI-development optimization paid off exactly as predicted**: timing-generator correctness
+  was fully checkable against the datasheet's numeric spec with no panel attached, and it found two
+  real bugs that way — a DCLK period that went out of spec at power-on, and a status field that
+  reported correctly only outside vertical blanking. On hardware, `make lcd-hw` reports 371×260
+  with 320×240 active at 62.2 Hz, cross-checked against host wall-clock at 62.8 fps. The panel
+  stays dark for a reason outside the FPGA: its FFC and the board's J2 are opposite contact types
+  (A vs B), so nothing mates. See `boards/tangnano20k/pinout.md` — it cannot be corrected in
+  software, because a flipped cable lands the panel's VDD, GND and 19 V backlight rail on FPGA I/O
+  pads.
 
-- **Phase 4 — live passthrough.** Composes Phase 1's capture path into Phase 3's driver path,
-  reusing the same runtime mux/command-channel convention to select between {mock→LCD}, {live HP
-  Prime capture→LCD}, {live capture→USB as in Phase 1} — all in one bitstream.
+- **Phase 4 — live passthrough. Written and passing simulation end to end; not synthesised, not on
+  hardware.** `src/targets/passthrough/` composes Phase 1's capture path into Phase 3's driver path,
+  with the runtime mux selecting {mock→LCD} or {live HP Prime capture→LCD} in one bitstream.
+  `src/common/prime_pixel.v` turns the sampled bus into addressed RGB565 pixels; a double-buffered
+  frame store in SDRAM does the retiming; buffers exchange at the *panel's* frame boundary so no
+  frame tears. Two buffers suffice only because the panel (62.2 Hz) is strictly faster than the
+  calculator (37.7 Hz) — the invariant that encodes it is asserted on every clock in the testbench.
+  Combined SDRAM load is 3.84 MW/s of ~10.8 MW/s, so no burst mode is needed.
 
   **This cannot be a wire-through, and that is now measured rather than anticipated.** Every
   temporal figure of the Prime's output is illegal for the panel: DOTCLK 13.1 MHz against a
@@ -94,6 +106,23 @@ is the reference implementation; later phases copy this pattern rather than rein
   it on independently generated panel-legal timing. The "clock-domain crossing / rate-matching"
   risk this phase always carried is exactly that. **AI-development optimization**: unit-testable
   in isolation via a randomized FIFO fill/drain testbench before ever combining with real video.
+
+### Why Phase 3 came before Phase 2's streaming was finished
+
+Phase 2 reached 2.0–2.6 fps over the UART after 4.6x RLE compression, and the measurements in
+`PROGRESS.md` (2026-08-03 part 3) showed the ceiling was per-request *latency*, not bit rate —
+raising the baud rate to 3 Mbaud made throughput worse, not better. Meanwhile the internal path is
+108 MHz x 32 bits = **432 MB/s**, roughly 4000x the serial link.
+
+Since static captures already establish that the protocol is understood — `docs/prime_lcd_protocol.md`
+is complete and every figure in it is measured — the remaining value is in the passthrough, which
+never touches the host at all. So the UART's job shrank to what it is actually good at: control and
+telemetry, a few bytes per second.
+
+**One caveat that survives the change of phase.** Phase 2's open "frames after the first are
+partial" bug lives in the capture *re-arm* path, not in the UART — host decoder speed, padding,
+VSYNC re-trigger and stale `fetch_pending` were each ruled out. Phase 4 re-arms per frame
+continuously, so that bug is likely to resurface there. It is deferred, not fixed.
 
 - **The SDRAM controller is the real next building block**, ahead of Phase 3 RTL. Two independent
   requirements converge on it. A full frame of capture is 2.86 M samples at 108 MHz against a

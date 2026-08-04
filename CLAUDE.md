@@ -1,10 +1,13 @@
 # HP_PRIME_LCD — Claude Code Reference
 
 HP Prime calculator LCD reverse-engineering project on a Sipeed Tang Nano 20K
-(Gowin GW2AR-LV18QN88C8/I7). Four phases — see `docs/architecture.md`. This repo is currently
-in **Phase 1** (logic analyser); proto-phase-1, which bootstrapped the agentic dev loop, is
-complete and merged. See `PROGRESS.md` for current
-status before assuming anything below has actually been run/verified this session.
+(Gowin GW2AR-LV18QN88C8/I7). Four phases — see `docs/architecture.md`. Phase 1 (logic analyser)
+and the SDRAM controller are done and working on hardware; Phase 2 captures and decodes whole
+frames; **Phase 3 (panel driver) is confirmed emitting correct timing on hardware**, but the panel
+displays nothing — its FFC is the opposite contact type to the board's socket, so nothing mates
+(blocked on a reversing A↔B FFC). **Phase 4 (passthrough) passes simulation end to end but has
+never been synthesised or run.** See `PROGRESS.md` for current status before assuming anything below has
+actually been run/verified this session.
 
 **The calculator's LCD bus is reverse-engineered and fully specified in
 `docs/prime_lcd_protocol.md`** — 320×240, 8-bit serial RGB, 3 DOTCLKs per pixel, component order
@@ -38,6 +41,7 @@ editing.
 | Flash to SRAM (volatile, fast iteration) | `make flash-sram` |
 | Flash to on-board flash (persistent) | `make flash` |
 | Hardware self-test over USB serial | `make selftest-hw` |
+| Phase 3 panel timing check + pattern select | `make lcd-hw` (add `PATTERN=0..7`, `BL=0..255`, `LEDS=on\|off`) |
 
 ## Toolchain paths
 
@@ -135,8 +139,35 @@ implementation. Full rationale in `docs/architecture.md`.
   `SPI_SCLK/MISO/MOSI/DIR`. There is no safe external reset pin on this board.
 - **The Gowin report's bank voltages are a tool default for banks with no assigned I/O**, not the
   board's supply. It lists pins 25–42 and 79–86 as `LVCMOS18`; the schematic's POWER sheet shows
-  every `VCCO` fed by a 3.3 V LDO. `docs/` holds the schematic and datasheet PDFs — read them with
-  the `Read` tool's `pages` argument, or `pdftotext -layout` for the net lists.
+  every `VCCO` fed by a 3.3 V LDO. Confirmed 2026-08-03: the `lcd_panel` build assigns pins 25–42
+  and every one now reports `LVCMOS33`/`3.3`. `docs/` holds the schematic and datasheet PDFs — read
+  them with the `Read` tool's `pages` argument, or `pdftotext -layout` for the net lists.
+- **The panel datasheet's AC tables are IMAGES.** `pdftotext` returns the section headings and
+  nothing else for pages 9–13 of `docs/AFY320240A0-3.5INTH-C2-spec.pdf`, which reads exactly like
+  "there is no timing table" rather than like a failed extraction. Use `Read` with `pages`. Two
+  figures (`Thw = 4`, `Tvw = 4`) were missing from `docs/panel_afy320240a0.md` for this reason
+  alone, and the SYNC-mode diagram settles a structural question the totals could only imply — the
+  sync pulse is nested *inside* the back porch.
+- **The board pulls the backlight enable UP, so it defaults ON.** Pin 49 reaches the LP3320's `EN`
+  through a 100 Ω series resistor, with a 27 kΩ pull-up to +3V3 alongside it. `PULL_MODE=DOWN` does
+  not win against that, so **every bitstream that does not actively drive pin 49 leaves the boost
+  converter enabled** — including `la_capture`, `frame_capture` and an unconfigured FPGA. Its
+  feedback comes from a sense resistor in series with the *panel's* LED string, so with no panel
+  mated it drives an open circuit at maximum. `lcd_panel` therefore ships `BL_DUTY_INIT = 0`.
+- **The onboard WS2812 latches its colour; an unassigned pin 79 leaves it lit.** Tying it low does
+  not clear it (a permanently low line is just an inter-frame gap) — the only fix is to send 24
+  zero bits, which `src/common/ws2812_off.v` does. Pin 79 is also `probe[8]`, so capturing targets
+  cannot silence it.
+- **A status reply of `a5 02 …` in 10 bytes means the board reset**, not that the link broke. SRAM
+  configuration is volatile and the onboard flash still holds `la_capture` (version 0x02, 10-byte
+  header), so any power blip silently swaps the running design. Dump raw reply bytes before
+  theorising about hardware faults.
+- **A signal that must not stall is a signal that must not be reset.** `lcd_timing_gen`'s DCLK
+  phase generator deliberately has no reset term: holding it parked stretched the first DCLK period
+  by the whole reset length (203.7 ns measured in simulation against a 200 ns spec maximum; ~304 µs
+  on hardware, where the POR is 32768 cycles). This is the *converse* of the heartbeat lesson
+  below, and it carries the same cost in reverse — DCLK toggling is not evidence the design is out
+  of reset, so nothing keys liveness off it.
 - **`iverilog` and `GowinSynthesis` are each permissive where the other is strict, in both
   directions.** `WARN (EX3638)` (implicit net) is a Gowin warning and an iverilog hard error;
   `ERROR (EX2000)` (a reg driven from two `always` blocks) is a Gowin hard error that iverilog

@@ -1,0 +1,7 @@
+src/common/uart_tx.v
+src/common/uart_rx.v
+src/common/pll_27_108.v
+src/common/lcd_timing_gen.v
+src/common/test_pattern.v
+src/common/ws2812_off.v
+src/targets/lcd_panel/lcd_panel_top.v

@@ -3,6 +3,287 @@
 Update this file at the end of each work session so a future session (human or agent) can
 pick up cold. Newest entries at the top.
 
+## 2026-08-03 (part 5) — PHASE 3 ON HARDWARE: FPGA side confirmed. Panel dark — A/B FFC mismatch.
+
+**Status: `make lcd-hw` → `PASS: lcd_panel emitting 320x240 in 371x260 at 62.2 Hz`, on real
+silicon, first flash. The panel itself displays nothing, and the cause is now known and is not in
+the FPGA: the panel's FFC and the Tang Nano's J2 are opposite contact types (A vs B), confirmed
+with a multimeter. Fix is a reversing 40-pin 0.5 mm FFC.**
+
+### The FPGA side is right, measured two independent ways
+
+```
+h = 320/371   v = 240/260        exactly the datasheet typical column
+line 61.8 us (spec 55-65)        frame 62.2 Hz (spec ~58-68)
+measured 62.8 fps over 0.51 s    <- host wall-clock, independent of the above
+```
+
+The last line is the one that matters. 62.2 Hz is *derived* from edges the FPGA counted on its own
+output pins; 62.8 fps is timed by the host against real time. A mis-locked PLL or a miscounting
+phase generator would still produce self-consistent 371x260 frames — only comparing against
+wall-clock catches it. Same two-instruments argument `docs/prime_lcd_protocol.md` uses for the
+Prime's frame rate.
+
+### The pre-flight check that mattered was the one flagged as unverifiable
+
+`docs/panel_afy320240a0.md` listed three checks needing eyes on hardware, first among them FPC
+contact orientation, with the note that it "cannot be settled from the schematic". That is exactly
+what failed. Nothing else was wrong.
+
+### Three things learned about the board, all of them traps
+
+- **Pin 49 (backlight enable) has a 27 kΩ pull-up to +3V3 on the board** (R29), with the FPGA
+  driving through R30 = 100 Ω. So the LP3320 boost is **enabled by default** and only an actively
+  driven low turns it off. `PULL_MODE=DOWN` in a `.cst` does not help — an internal ~50 kΩ pulldown
+  loses to an external 27 kΩ pull-up. **Any bitstream that does not drive pin 49 leaves the
+  backlight converter enabled**, including `la_capture`, `frame_capture` and an unconfigured FPGA.
+- **The onboard WS2812 latches its colour and holds it.** Leaving pin 79 unassigned lets the data
+  line float, pick up noise and latch some arbitrary bright colour; tying it low does not clear it,
+  because a permanently low line is just an endless inter-frame gap. The only fix is to *send* 24
+  zero bits — hence `src/common/ws2812_off.v`. **Pin 79 is also `probe[8]` (the Prime's D4)**, so a
+  capturing target cannot silence this LED.
+- **A status report of `a5 02 …` in 10 bytes means the board reset.** SRAM configuration is
+  volatile, and the onboard flash still holds `la_capture` (report version 0x02, 10-byte header)
+  from an earlier session. Any power blip silently swaps the running design for that one, and the
+  symptom is a truncated reply rather than a dead link. Free diagnostic; worth knowing.
+
+### Changes made
+
+- `src/common/ws2812_off.v` — continuous zero frames, holds the RGB LED dark.
+- Status LED row now **defaults off**, runtime-switchable with `0x4C 'L'` (`make lcd-hw LEDS=on`).
+  `leds[0]` keeps its ~1.6 Hz heartbeat unconditionally: `docs/verification.md`'s argument for a
+  liveness indicator is that it must work when the serial link does not, and an all-dark board
+  cannot be told apart from an unconfigured one.
+- **`BL_DUTY_INIT` changed from 64 to 0 — the backlight is now opt-in.** The original reasoning
+  ("start dim, it is the cheap direction to be wrong in") missed the case where no panel is mated:
+  the LP3320 takes its feedback from R31 in series with the panel's LED string, so with no LED
+  current FB never reaches threshold and the converter drives to maximum into an open circuit.
+  A display driver must not enable a boost into a load it cannot detect, and nothing on the 40-pin
+  connector reports back. The testbench pins the shipped default at 0 while overriding it to 64 so
+  the PWM duty measurements still have edges to measure.
+
+### Two wrong turns, recorded because both cost time
+
+- **A truncated status reply was diagnosed as a brownout caused by the backlight.** It was not —
+  the board had been power-cycled manually between trials and had reconfigured from flash. The
+  reading that settled it was the raw reply bytes (`a5 02 30 …`), not any amount of reasoning about
+  boost converters. Dump the bytes first.
+- **A misread meter (2.66 A, actually 2 W ≈ 400 mA) triggered a damage scare and an emergency
+  power-down.** Nothing was damaged. The arithmetic that should have been done immediately: all six
+  indicator LEDs plus a full-white WS2812 come to ~0.12 A, so LEDs could never have explained
+  2.66 A — but they explain 400 mA fine.
+
+### Can the FFC mismatch be fixed in software, or worked around with jumper wires? No, and partly.
+
+Both asked and both answered from the datasheet's Pinout diagram (page 5), now recorded in
+`boards/tangnano20k/pinout.md`.
+
+**Flipping in software is impossible**, and for a power reason rather than a signal one. A flipped
+cable mates board pin *N* with panel pin *41−N*, which lands the panel's VDD on FPGA pin 15, its
+19 V backlight anode on FPGA pin 17, and its ground on FPGA pin 38. A `.cst` can reassign which pin
+carries which *signal*; it cannot make an I/O pad supply a rail.
+
+**Jumper wires from the headers are possible but constrained.** The headers expose 34 free IOs, 31
+usable after excluding the three BL616 pins. But **the entire green channel (32–37) and the top
+three red bits (38/39/40) are not on the headers at all** — they exist only at the FFC socket, so
+other header IOs would have to be reassigned to them. Full RGB565 + sync + backlight is 25 of 31,
+which leaves too few for Phase 4's twelve probes; RGB444 fits both. And `VLED+`/`VLED-` are *only*
+at FFC positions 1/2, so a header-wired panel has no access to the board's 19 V boost and needs an
+external constant-current driver. `3V3` and `GND` are on the headers, so panel VDD is fine.
+
+Conclusion: the reversing FFC is the cheaper and strictly better fix — it keeps 16-bit colour, the
+onboard backlight supply, and Phase 4's probe budget.
+
+### PHASE 4 also landed this session: `src/targets/passthrough/`
+
+Written and passing simulation end to end, **not synthesised and not run on hardware**, parked
+behind Phase 3's panel. New: `src/common/prime_pixel.v`, `src/targets/passthrough/`,
+`sim/targets/prime_pixel/`, `sim/targets/passthrough/`.
+
+```
+PASS: passthrough -- 320 x 8 source pixels captured from a 1361-DOTCLK line at 37.7 Hz-class
+timing, buffered in SDRAM and re-emitted exactly on 371 x 260 panel timing at 62 Hz, mux verified
+in both directions, 0 overruns, 0 underruns
+```
+
+- **`prime_pixel`** turns `dotclk_sampler` output into addressed RGB565 pixels, resetting the
+  component phase on the DE rising edge. Its unit testbench decodes a full 320×240 frame at real
+  Prime timing — 76,800 pixels, 0 value errors, 0 coordinate errors, 0 runts — in 5 s, using
+  Phase 1's `video_timing_gen` as an independent implementation of the protocol.
+- **Double buffering exchanges at the panel's frame boundary**, so no frame tears. Two buffers
+  suffice *only* because the panel (62.2 Hz) is strictly faster than the calculator (37.7 Hz);
+  the invariant that encodes this (`wr_active` and `wdone` never both set) is asserted on every
+  clock rather than reasoned about once.
+- **Rate budget: 1.45 MW/s writer + 2.39 MW/s reader = 3.84 of ~10.8 MW/s.** No burst mode needed,
+  which is the measurement `docs/sdram.md` asked for before optimising.
+- Buffers sit in different SDRAM *banks* (stride 2^19) — irrelevant to today's single-word
+  controller, but it is the layout an open-row policy would need.
+- An in-flight SDRAM read is explicitly discarded across a frame restart (`rd_discard`). That is
+  the exact class of bug left open in Phase 2's `frame_stream`, so it was handled rather than
+  assumed away.
+
+### Open
+
+- **Waiting on a reversing (type A ↔ type B) 40-pin 0.5 mm FFC.** Everything else is ready.
+- The PWM-on-a-boost-enable question is still unresolved: at 25% duty / 1 kHz the on-time is 250 µs
+  and the LP3320's soft-start is unknown, so "dim" may simply not be reachable. Untested — the one
+  full-duty trial ran into an open circuit, which proves nothing about the loaded case. The LP3320
+  datasheet (FB reference, soft-start, current limit, OVP) would settle both this and what current
+  R31 = 5.6 Ω actually sets.
+- Phase 4 (`src/targets/passthrough/`) is written and passes simulation end to end — Prime →
+  SDRAM → panel, 0 overruns, 0 underruns — but is **not synthesised and not run on hardware**, and
+  is parked until the panel is confirmed working. Note it cannot silence the RGB LED (pin 79 is a
+  probe there).
+
+## 2026-08-03 (part 4) — PHASE 3: panel driver written and verified in simulation. No hardware yet.
+
+**Status: `make sim SIM_TARGET=lcd_timing_gen` and `SIM_TARGET=lcd_panel` both PASS; `make build
+BUILD_TARGET=lcd_panel` → 2201 paths, 0 setup / 0 hold; `make build-oss` passes. All eight
+simulations in the repo pass. NOTHING HAS BEEN RUN ON THE PANEL — it was not connected during this
+session.** New: `src/common/lcd_timing_gen.v`, `src/common/test_pattern.v`,
+`src/targets/lcd_panel/`, `sim/targets/lcd_timing_gen/`, `sim/targets/lcd_panel/`,
+`python/tools/lcd_panel.py`, `make lcd-hw`.
+
+### Why Phase 3 now, ahead of finishing Phase 2's streaming
+
+The decision was made on bandwidth. Streaming frames to the host maxed out at 2.0–2.6 fps at
+1 Mbaud even after 4.6x RLE, and the measurements in part 3 showed the ceiling was per-request
+latency, not bit rate — raising the baud rate to 3 Mbaud made it *worse*. The internal path is
+108 MHz x 32 bits = 432 MB/s. Static captures already prove the protocol is understood
+(`docs/prime_lcd_protocol.md` is complete and every figure in it is measured), so the remaining
+value is in the passthrough, which never touches the host.
+
+**This defers the "frames after the first are partial" bug rather than fixing it.** That bug is in
+the capture re-arm path, not in the UART — the evidence in part 3 rules out host decoder speed,
+padding, VSYNC re-trigger and stale `fetch_pending`. Phase 4 re-arms per frame continuously, so it
+is likely to resurface there. Recording it here so a future session does not assume the phase
+change made it go away.
+
+### Two numbers that were not in `docs/panel_afy320240a0.md` before
+
+The datasheet's AC tables are **images**, so `pdftotext` returns nothing for them and the existing
+panel analysis was derived from the totals. Reading pages 10–13 visually confirms every derived
+figure and adds the two pulse widths:
+
+| | Min | Typ | Max | |
+|---|---|---|---|---|
+| Thw (HSYNC pulse) | 2 | **4** | 43 | DCLK |
+| Tvw (VSYNC pulse) | 2 | **4** | 12 | HSYNC |
+
+The SYNC-mode diagram on p.11 also settles directly what the arithmetic had only implied: **Thbp is
+measured from the HSYNC falling edge and Thw is nested inside it.** Same for Tvw inside Tvbp. Get it
+backwards and the image sits 4 pixels off with no other symptom.
+
+### The one real design decision: DCLK is phase-shifted a quarter period
+
+Every timing figure in the datasheet labels the clock "DCLK (Negative Polarity)", but the figures
+are low-resolution scans and which edge the panel latches on cannot be read off them with
+confidence. Normally you would set DPOL over the SPI — which is unreachable, because the board
+grounds the panel's CS pin and a command only latches on CS's *rising* edge.
+
+Guessing is a coin flip with a catastrophic wrong side: data changing *at* the sampling edge
+corrupts every pixel. So instead, data transitions at phase 0 of the 18-cycle DCLK period and the
+clock's two edges sit at phases 4 and 13:
+
+| | setup | hold |
+|---|---|---|
+| falling edge (phase 4) | 37.0 ns | 129.6 ns |
+| rising edge (phase 13) | 120.4 ns | 46.3 ns |
+
+The spec is 12 ns for both. The worst of the four is **3.1x** the requirement, so the design is
+correct on either polarity, and duty stays exactly 50% against a 40–60% spec. This is only
+affordable because 6 MHz is slow — one DCLK is 18 system clocks, so quarter-period granularity is
+free. It would not work at 108 MHz.
+
+### Four bugs, two in the RTL and two in the testbenches
+
+1. **DCLK went out of spec at power-on.** With the phase counter held in reset, DCLK parked high
+   and the first period after release was stretched by the full reset length — 203.7 ns measured
+   against a 200 ns maximum, and the real power-on reset is 32768 cycles, so on hardware that first
+   period would have been ~304 µs. Fixed by letting the phase generator free-run from
+   configuration and resetting only the video counters; the anomaly becomes a long *line* at
+   power-on instead, which is ordinary. Caught because the testbench records the **maximum** period
+   as well as the minimum — checking only "the period is 166 ns" would have passed.
+   Cost, documented in the module: DCLK toggling is no longer evidence the design is out of reset.
+2. **The status report's "active DCLKs per line" was latched on blanking lines too**, so it read 0
+   whenever the host's request happened to land during vertical blanking — a `make lcd-hw` that
+   passes or fails on timing luck. It surfaced as "active DCLKs = 0" alongside a correct "active
+   lines = 240", a contradiction that could only come from the latch condition rather than the
+   counter.
+3. **Testbench: the reply was read after the request was fully sent.** The FPGA turns a status
+   request around in a few 108 MHz cycles, so the first reply start bit had already passed by the
+   time the receiver looked for it. Fixed by forking the receiver before the request goes out.
+   Worth knowing this is a host-side hazard too — pyserial's buffering hides it, which is why
+   simulation was the cheaper place to find it.
+4. **Testbench: the backlight duty window ended exactly on a falling edge**, and whether the
+   accumulator process or the task's stop-measuring assignment ran first is undefined in Verilog.
+   It reported exactly half the true duty — convincing enough to be mistaken for a real divide-by-2
+   in the RTL. Fixed by walking edges inside a single process.
+
+### Mutation-tested, per `docs/verification.md`
+
+Five deliberate breaks, all caught, each with a diagnostic naming the actual fault:
+
+| Mutation | Caught as |
+|---|---|
+| `DCLK_FALL` 4 → 1 | `worst setup = 9.260 ns` (spec 12) + duty out of range |
+| `DCLK_RISE` 13 → 18 (edge lands on the data change) | `worst hold = 0.000 ns` |
+| `H_FRONT` 8 → 7 | `Th = 370, expected 371` and `Thfp = 7, expected 8` |
+| `H_SYNC` 4 → 43 (sync no longer nested in the back porch) | `Thw 43 is not nested inside Thbp 43` |
+| `DCLK_FALL` 4 → 0 | degenerate — the comparison never matches, DCLK stops, watchdog fires. Not a useful mutation; replaced with the two above |
+
+### Verification structure
+
+Two testbenches, deliberately split:
+
+- **`sim/targets/lcd_timing_gen`** — the AC table at full size, in the datasheet's own units: DCLKs
+  between HSYNC falls, HSYNC falls between VSYNC falls. Nothing reads `hc`/`vc`/`ph` inside the
+  DUT. 6 s.
+- **`sim/targets/lcd_panel`** — everything *between* the modules: all 76,800 active pixels of a
+  frame compared against an oracle written from `test_pattern.v`'s documented spec (not copied from
+  its code), the bus asserted to be 0 outside DE, the command channel driven over a bit-banged
+  1 Mbaud UART, and the status report cross-checked against what the testbench measured off the
+  same pins. It also fires `CMD_RESET` **mid-frame** and re-checks the full geometry and all 76,800
+  pixels afterwards — that is the only test of `lcd_timing_gen`'s deferred restart, which holds a
+  restart request until the next DCLK tick precisely so the outputs never move at an arbitrary
+  phase. 60 s.
+
+The top-level testbench overrides `BL_DELAY_CYCLES` to something a simulation can afford, and then
+asserts the *shipped* default is ≥ 250 ms via a second, deliberately-never-clocked instance — so
+"shrunk for simulation" cannot quietly become "shrunk on hardware".
+
+### Numbers
+
+- Gowin signoff: 2201 paths, 0 setup / 0 hold. 719 logic (4%), 396 registers (3%), **30/66
+  package I/O**.
+- Every one of the 30 pins checked against the report's Function column: no `MODE*`, `DONE`,
+  `RECONFIG_N`, `READY` or `JTAGSEL_N` among them.
+- **All banks now report `BankVccio 3.3`**, where previous builds showed pins 25–42 as `LVCMOS18`.
+  That confirms `boards/tangnano20k/pinout.md`'s claim that the 1.8 V reading was the tool's
+  default for banks holding *no assigned I/O*, not the board.
+- 18 output registers were placed in IOBs, which helps output skew for free.
+- Two build warnings, both read: `PR1014` on `clk_d` (expected, documented, the 27 MHz hop into the
+  PLL) and `NL0002` "module test_pattern is swept in optimizing" — module-boundary flattening, not
+  logic removal; 719 LUTs is far more than a bare timing generator plus UART.
+
+### Open — all of these need the panel physically attached
+
+- **Nothing has been driven into a panel.** Everything above is simulation plus two clean builds.
+- **DCLK polarity is still unknown**, and by design it does not matter. If pixels smear anyway,
+  `DCLK_FALL`/`DCLK_RISE` in `lcd_timing_gen` are the two parameters to move.
+- **DISP (connector pin 31) is hard-tied to +3V3 on the board**, so the datasheet's `T1 ≥ 10 ms`
+  between internal reset and DISP is very likely violated. Commodity boards do this routinely. If
+  the panel fails to initialise, cutting that trace and driving DISP from pin 52 — the one spare
+  FPGA pin — is the first thing to try.
+- **Backlight current is unmeasured.** The panel wants 19.2 V at 40 mA, absolute max 50 mA; the
+  board's driver was designed for Sipeed's 4.3" panel. The bitstream comes up at 25% PWM duty
+  deliberately. Measure on pattern 4 (WHITE) before raising it.
+- **FFC contact orientation is unverified** — both connectors are 40-pin 0.5 mm, but the contact
+  face needs eyes on the hardware. If it is wrong the fix is a flipped FFC extension, not an
+  adapter.
+- Phase 4 composes this with `frame_capture`: it will need `options.tcl` (the SSPI pins for the
+  probes) and a frame buffer in SDRAM, and it inherits the part-3 partial-frame bug noted above.
+
 ## 2026-08-03 (part 3) — LIVE STREAMING: first complete frame streams, later frames partial
 
 **Status: `make stream-hw` → `PASS: live stream, 8 frames decoded at 2.56 fps, 0 truncated`.

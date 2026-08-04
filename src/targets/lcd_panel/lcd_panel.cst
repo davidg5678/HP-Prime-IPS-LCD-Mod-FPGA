@@ -1,0 +1,169 @@
+// Pin constraints for lcd_panel (Phase 3 -- drive the physical RGB panel).
+//
+// ============================================================================
+// SOURCE OF TRUTH
+// ============================================================================
+// Every pin below is from the DISPLAY sheet of
+// docs/Tang_Nano_20K_3923_Schematics-1.pdf -- the BOARD's own wiring, which is
+// panel-independent. It is not from a Sipeed example .cst. An earlier version of
+// the table in boards/tangnano20k/pinout.md did come from Sipeed's
+// rgb_lcd/lcd_480_272 example and carried a "re-verify before relying on this"
+// caveat; that verification happened on 2026-08-02 and this file is downstream
+// of it.
+//
+// ============================================================================
+// BIT ORDER -- the easiest thing on this connector to get silently wrong
+// ============================================================================
+// The schematic names run HIGH to LOW across ASCENDING pin numbers:
+//     LCD_R7..R3 -> pins 38, 39, 40, 41, 42
+//     LCD_G7..G2 -> pins 32, 33, 34, 35, 36, 37
+//     LCD_B7..B3 -> pins 27, 28, 29, 30, 31
+// so pin 38 is R7 (the MSB) and pin 42 is R3 (the LSB). The mapping below is
+// therefore DESCENDING in pin number as the vector index ascends, which looks
+// like a mistake and is not.
+//
+// Getting this reversed does not black the screen -- it produces a picture with
+// plausible-looking wrong colours, which is the failure mode this project keeps
+// paying for. test_pattern.v's RAMPS pattern (index 2) exists specifically to
+// make it visible: a reversed channel turns a smooth ramp into a staircase that
+// jumps backwards, whereas colour bars would look merely "wrong" without saying
+// how.
+//
+// ============================================================================
+// R2..R0, G1..G0, B2..B0 ARE TIED TO GND ON THE PCB
+// ============================================================================
+// So the connector is RGB565 regardless of which panel is plugged in, and no
+// adapter can recover the missing bits -- the FPGA pins simply are not routed to
+// those connector positions. See docs/panel_afy320240a0.md. Our 31 is the
+// panel's 248, not 255.
+//
+// Bank voltage: the Gowin report lists pins 25-42 as LVCMOS18 with BankVccio
+// 1.8. That is the tool's default for a bank holding no assigned I/O, NOT the
+// board -- the POWER sheet shows VCCO_4/VCCO_5 fed by ME6211C33 3.3 V LDOs and
+// the datasheet pinout legend marks every bank V_IO = 3.3 V. The panel's
+// V_IH is 0.7 x VDD = 2.31 V, which 3.3 V LVCMOS meets and 1.8 V would not.
+//
+// No options.tcl is needed for this target: it uses none of the SSPI pins
+// (52-56) that la_capture and frame_capture have to reclaim for probes. Phase 4,
+// which does both at once, will need one.
+
+IO_LOC "clk" 4;
+IO_PORT "clk" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+// Onboard BL616 UART -- control and telemetry only in this target; the video
+// path never touches it. Hard-wired to the BL616, so never drive externally.
+IO_LOC "uart_rx" 70;
+IO_PORT "uart_rx" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+IO_LOC "uart_tx" 69;
+IO_PORT "uart_tx" IO_TYPE=LVCMOS33 DRIVE=8;
+
+// ------------------------------------------------------------------- red
+// lcd_r[4] = R7 (MSB) ... lcd_r[0] = R3 (LSB)
+IO_LOC "lcd_r[4]" 38;
+IO_PORT "lcd_r[4]" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_LOC "lcd_r[3]" 39;
+IO_PORT "lcd_r[3]" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_LOC "lcd_r[2]" 40;
+IO_PORT "lcd_r[2]" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_LOC "lcd_r[1]" 41;
+IO_PORT "lcd_r[1]" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_LOC "lcd_r[0]" 42;
+IO_PORT "lcd_r[0]" IO_TYPE=LVCMOS33 DRIVE=8;
+
+// ----------------------------------------------------------------- green
+// lcd_g[5] = G7 (MSB) ... lcd_g[0] = G2 (LSB). Six bits, not five: green gets
+// the extra bit in 5:6:5 because the eye resolves luminance best there, and the
+// board's grounding follows the standard.
+IO_LOC "lcd_g[5]" 32;
+IO_PORT "lcd_g[5]" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_LOC "lcd_g[4]" 33;
+IO_PORT "lcd_g[4]" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_LOC "lcd_g[3]" 34;
+IO_PORT "lcd_g[3]" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_LOC "lcd_g[2]" 35;
+IO_PORT "lcd_g[2]" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_LOC "lcd_g[1]" 36;
+IO_PORT "lcd_g[1]" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_LOC "lcd_g[0]" 37;
+IO_PORT "lcd_g[0]" IO_TYPE=LVCMOS33 DRIVE=8;
+
+// ------------------------------------------------------------------ blue
+// lcd_b[4] = B7 (MSB) ... lcd_b[0] = B3 (LSB)
+IO_LOC "lcd_b[4]" 27;
+IO_PORT "lcd_b[4]" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_LOC "lcd_b[3]" 28;
+IO_PORT "lcd_b[3]" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_LOC "lcd_b[2]" 29;
+IO_PORT "lcd_b[2]" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_LOC "lcd_b[1]" 30;
+IO_PORT "lcd_b[1]" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_LOC "lcd_b[0]" 31;
+IO_PORT "lcd_b[0]" IO_TYPE=LVCMOS33 DRIVE=8;
+
+// ------------------------------------------------------------------ sync
+// Pin 77 is also GCLKT_1. Nothing clocks off it here -- DCLK is generated as a
+// phase within the 108 MHz domain, not used as a clock -- but it is the right
+// pin for it regardless, and Phase 4 keeps the option open.
+IO_LOC "lcd_ck" 77;
+IO_PORT "lcd_ck" IO_TYPE=LVCMOS33 DRIVE=8;
+
+IO_LOC "lcd_hs" 25;
+IO_PORT "lcd_hs" IO_TYPE=LVCMOS33 DRIVE=8;
+
+IO_LOC "lcd_vs" 26;
+IO_PORT "lcd_vs" IO_TYPE=LVCMOS33 DRIVE=8;
+
+IO_LOC "lcd_de" 48;
+IO_PORT "lcd_de" IO_TYPE=LVCMOS33 DRIVE=8;
+
+// ------------------------------------------------------------- backlight
+// Enable for the board's boost regulator. PULL_MODE=DOWN so the backlight is
+// OFF from power-on until the FPGA is configured and has served the datasheet's
+// 250 ms T2 delay -- an unconfigured FPGA must not be able to light it.
+// The panel wants 19.2 V at 40 mA, absolute max 50 mA; the board's driver (U6,
+// R31 = 5.6 ohm sense) was designed for Sipeed's 4.3" panel. MEASURE the current
+// before running continuously -- see docs/panel_afy320240a0.md.
+IO_LOC "lcd_bl" 49;
+IO_PORT "lcd_bl" IO_TYPE=LVCMOS33 PULL_MODE=DOWN DRIVE=8;
+
+// ------------------------------------------------------------------ LEDs
+// leds[0..3] are pins 15-18, which the board ALSO wires to the FPC connector as
+// LCD_INT0..3 (connector positions 37-40). On the AFY320240A0 those positions
+// are XR/YD/XL/YU -- resistive-touch pins the datasheet marks NC, with nothing
+// connected at the far end -- so driving them is harmless here. This panel's
+// touch controller is capacitive and lives on a SEPARATE 6-pin FFC that the
+// 40-pin connector does not carry at all.
+//
+// If a future phase uses a panel with resistive touch, or wires that second
+// FFC, these four LEDs must be given up. Nothing has had to choose yet.
+IO_LOC "leds[0]" 15;
+IO_PORT "leds[0]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+
+IO_LOC "leds[1]" 16;
+IO_PORT "leds[1]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+
+IO_LOC "leds[2]" 17;
+IO_PORT "leds[2]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+
+IO_LOC "leds[3]" 18;
+IO_PORT "leds[3]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+
+IO_LOC "leds[4]" 19;
+IO_PORT "leds[4]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+
+IO_LOC "leds[5]" 20;
+IO_PORT "leds[5]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+
+// ------------------------------------------------------- onboard RGB LED
+// WS2812 data input, via a 100 ohm series resistor. Driven -- not left
+// unassigned -- because the part LATCHES its colour: a floating data line
+// picks up noise and leaves the LED lit at some arbitrary bright colour, and
+// tying it low does not clear it (a permanently low line is just an endless
+// inter-frame gap). src/common/ws2812_off.v sends it zeros continuously.
+//
+// NOTE: this pin is GCLKC_0 and is `probe[8]` -- the HP Prime's D4 -- in
+// la_capture, frame_capture, frame_stream and passthrough. A target that
+// captures cannot also silence this LED.
+IO_LOC "rgb_led" 79;
+IO_PORT "rgb_led" IO_TYPE=LVCMOS33 DRIVE=8;

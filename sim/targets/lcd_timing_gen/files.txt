@@ -1,0 +1,2 @@
+src/common/lcd_timing_gen.v
+sim/targets/lcd_timing_gen/tb_lcd_timing_gen.v

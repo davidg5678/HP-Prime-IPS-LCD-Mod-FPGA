@@ -1,0 +1,205 @@
+// Pin constraints for passthrough (Phase 4 -- Prime -> SDRAM -> panel).
+//
+// This target is the union of frame_capture's twelve probe channels and
+// lcd_panel's twenty-one LCD pins, and it is the design those two pin maps were
+// chosen to make possible. From boards/tangnano20k/pinout.md:
+//
+//   "Phase 3 drives a panel from the board's own 40-pin RGB LCD FPC connector
+//    and Phase 4 does that WHILE capturing, so those pins can never be shared
+//    with the probes."
+//
+// That constraint is now cashed in. Subtract the LCD connector (20 pins + the
+// backlight), the BL616 pins (13/69/70/75/76/86) and the six LEDs, and the
+// 2x20 headers have exactly THIRTEEN pins left for twelve probes -- and five of
+// those thirteen (52-56) are dedicated SSPI configuration pins that gw_sh will
+// not place user I/O on without `set_option -use_sspi_as_gpio 1`. See
+// src/targets/passthrough/options.tcl. Without that option only eight usable
+// pins remain, and this design needs twelve. Pin 52 is the single spare, held
+// in reserve in case the panel's DISP line has to be driven (see
+// docs/panel_afy320240a0.md).
+//
+// Total: 12 probes + 20 LCD + backlight + 6 LEDs + 2 UART + clk = 42 of 53
+// regular I/O. The 55 SDRAM signals cost nothing -- Gowin bonds O_sdram_* and
+// IO_sdram_dq to the in-package die on internal pads. See docs/sdram.md.
+//
+// The per-pin rationale is NOT repeated here. Probe channels and their caveats:
+// src/targets/frame_capture/frame_capture.cst. LCD bit order (which runs
+// backwards relative to the pin numbers, and is the easiest thing on this
+// connector to get silently wrong): src/targets/lcd_panel/lcd_panel.cst.
+
+IO_LOC "clk" 4;
+IO_PORT "clk" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+// Onboard BL616 UART. Unchanged from proto-phase-1: verified working at
+// 1 Mbaud, hard-wired to the BL616 with no jumper, so never drive externally.
+IO_LOC "uart_rx" 70;
+IO_PORT "uart_rx" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+IO_LOC "uart_tx" 69;
+IO_PORT "uart_tx" IO_TYPE=LVCMOS33 DRIVE=8;
+
+// ---------------------------------------------------------------- probes
+//
+// Mapped to the HP Prime's 45-pin LCD flex, pins 7-18, identified by
+// oscilloscope in docs/"HP Prime LCD Pinout.xlsx":
+//   flex 7  DE      9.8 kHz bursts, 24.7 ms on / 1.96 ms off (= 237 active lines)
+//   flex 8  VSYNC   37.7 Hz
+//   flex 9  HSYNC   9.61 kHz          -> 255 lines/frame, 320x240 panel
+//   flex 10 DOTCLK  13.1 MHz          -> 1363 DOTCLKs per line
+//   flex 11..18     D0..D7
+//
+// PULL_MODE=DOWN so an UNCONNECTED channel reads a steady 0 rather than
+// floating. A floating logic-analyser input produces convincing-looking noise,
+// which is the worst possible failure mode for a tool whose whole job is
+// telling you what a wire did. It also holds pin 51 (the audio amp's SD_MODE)
+// shut down while nothing is attached.
+
+IO_LOC "probe[0]" 80;    // DOTCLK <- flex 10.
+IO_PORT "probe[0]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+// GCLKT_0 -- the fastest signal on the only global-clock-capable pin still
+// available. Nothing in this design clocks off it today; a future synchronous
+// capture mode (sample ON DOTCLK rather than oversampling, which is how a full
+// frame fits in memory) needs exactly that, and pin assignments are the
+// expensive thing to change once wires are soldered to a calculator.
+// Shares the microSD DAT2 net: a 10k pull-up, negligible, but do not expect
+// this to work with an SD card inserted.
+
+IO_LOC "probe[1]" 71;    // HSYNC  <- flex 9   (clean: header only)
+IO_PORT "probe[1]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+
+IO_LOC "probe[2]" 53;    // VSYNC  <- flex 8
+IO_PORT "probe[2]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+// The ONE pin carrying a 2.2k pull-up to 3V3 (HDMI DDC, through a 2N7002).
+// That makes the Prime's driver sink an extra ~1.5 mA when low, and if its V_OL
+// rises past the FPGA's 0.8 V V_IL the channel misreads. Deliberately assigned
+// to the 37.7 Hz frame sync: a corrupted VSYNC is instantly obvious in the
+// decode, whereas a corrupted data bit is silent and yields plausible-looking
+// wrong pixels.
+
+IO_LOC "probe[3]" 51;    // DE     <- flex 7
+IO_PORT "probe[3]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+// Doubles as the audio amp's SD_MODE and as RPLL2_T_in. Both are acceptable:
+// this design uses the LEFT PLL, and with no speaker fitted on J4 the amp is
+// inert (PULL_MODE=DOWN holds it shut down when nothing is connected).
+// Preferred over the spare pin 52, which carries the second 2.2k DDC pull-up.
+
+IO_LOC "probe[4]" 72;    // D0     <- flex 11  (clean: header only)
+IO_PORT "probe[4]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+
+IO_LOC "probe[5]" 73;    // D1     <- flex 12  (clean: header only)
+IO_PORT "probe[5]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+
+IO_LOC "probe[6]" 74;    // D2     <- flex 13  (clean: header only)
+IO_PORT "probe[6]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+
+IO_LOC "probe[7]" 85;    // D3     <- flex 14  (microSD DAT1, 10k pull-up)
+IO_PORT "probe[7]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+
+IO_LOC "probe[8]" 79;    // D4     <- flex 15  (WS2812 data-in via 100R; GCLKC_0)
+IO_PORT "probe[8]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+
+IO_LOC "probe[9]" 56;    // D5     <- flex 16  (I2S_BCLK -> amp input, high-Z)
+IO_PORT "probe[9]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+
+IO_LOC "probe[10]" 54;   // D6     <- flex 17  (I2S_DIN  -> amp input, high-Z)
+IO_PORT "probe[10]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+
+IO_LOC "probe[11]" 55;   // D7     <- flex 18  (I2S_LRCK -> amp input, high-Z)
+IO_PORT "probe[11]" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+
+// ------------------------------------------------------------------- red
+// lcd_r[4] = R7 (MSB) ... lcd_r[0] = R3 (LSB)
+IO_LOC "lcd_r[4]" 38;
+IO_PORT "lcd_r[4]" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_LOC "lcd_r[3]" 39;
+IO_PORT "lcd_r[3]" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_LOC "lcd_r[2]" 40;
+IO_PORT "lcd_r[2]" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_LOC "lcd_r[1]" 41;
+IO_PORT "lcd_r[1]" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_LOC "lcd_r[0]" 42;
+IO_PORT "lcd_r[0]" IO_TYPE=LVCMOS33 DRIVE=8;
+
+// ----------------------------------------------------------------- green
+// lcd_g[5] = G7 (MSB) ... lcd_g[0] = G2 (LSB). Six bits, not five: green gets
+// the extra bit in 5:6:5 because the eye resolves luminance best there, and the
+// board's grounding follows the standard.
+IO_LOC "lcd_g[5]" 32;
+IO_PORT "lcd_g[5]" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_LOC "lcd_g[4]" 33;
+IO_PORT "lcd_g[4]" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_LOC "lcd_g[3]" 34;
+IO_PORT "lcd_g[3]" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_LOC "lcd_g[2]" 35;
+IO_PORT "lcd_g[2]" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_LOC "lcd_g[1]" 36;
+IO_PORT "lcd_g[1]" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_LOC "lcd_g[0]" 37;
+IO_PORT "lcd_g[0]" IO_TYPE=LVCMOS33 DRIVE=8;
+
+// ------------------------------------------------------------------ blue
+// lcd_b[4] = B7 (MSB) ... lcd_b[0] = B3 (LSB)
+IO_LOC "lcd_b[4]" 27;
+IO_PORT "lcd_b[4]" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_LOC "lcd_b[3]" 28;
+IO_PORT "lcd_b[3]" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_LOC "lcd_b[2]" 29;
+IO_PORT "lcd_b[2]" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_LOC "lcd_b[1]" 30;
+IO_PORT "lcd_b[1]" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_LOC "lcd_b[0]" 31;
+IO_PORT "lcd_b[0]" IO_TYPE=LVCMOS33 DRIVE=8;
+
+// ------------------------------------------------------------------ sync
+// Pin 77 is also GCLKT_1. Nothing clocks off it here -- DCLK is generated as a
+// phase within the 108 MHz domain, not used as a clock -- but it is the right
+// pin for it regardless, and Phase 4 keeps the option open.
+IO_LOC "lcd_ck" 77;
+IO_PORT "lcd_ck" IO_TYPE=LVCMOS33 DRIVE=8;
+
+IO_LOC "lcd_hs" 25;
+IO_PORT "lcd_hs" IO_TYPE=LVCMOS33 DRIVE=8;
+
+IO_LOC "lcd_vs" 26;
+IO_PORT "lcd_vs" IO_TYPE=LVCMOS33 DRIVE=8;
+
+IO_LOC "lcd_de" 48;
+IO_PORT "lcd_de" IO_TYPE=LVCMOS33 DRIVE=8;
+
+// ------------------------------------------------------------- backlight
+// Enable for the board's boost regulator. PULL_MODE=DOWN so the backlight is
+// OFF from power-on until the FPGA is configured and has served the datasheet's
+// 250 ms T2 delay -- an unconfigured FPGA must not be able to light it.
+// The panel wants 19.2 V at 40 mA, absolute max 50 mA; the board's driver (U6,
+// R31 = 5.6 ohm sense) was designed for Sipeed's 4.3" panel. MEASURE the current
+// before running continuously -- see docs/panel_afy320240a0.md.
+IO_LOC "lcd_bl" 49;
+IO_PORT "lcd_bl" IO_TYPE=LVCMOS33 PULL_MODE=DOWN DRIVE=8;
+
+// ------------------------------------------------------------------ LEDs
+// leds[0..3] are pins 15-18, which the board ALSO wires to the FPC connector as
+// LCD_INT0..3 (connector positions 37-40). On the AFY320240A0 those positions
+// are XR/YD/XL/YU -- resistive-touch pins the datasheet marks NC, with nothing
+// connected at the far end -- so driving them is harmless here. This panel's
+// touch controller is capacitive and lives on a SEPARATE 6-pin FFC that the
+// 40-pin connector does not carry at all.
+//
+// If a future phase uses a panel with resistive touch, or wires that second
+// FFC, these four LEDs must be given up. Nothing has had to choose yet.
+IO_LOC "leds[0]" 15;
+IO_PORT "leds[0]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+
+IO_LOC "leds[1]" 16;
+IO_PORT "leds[1]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+
+IO_LOC "leds[2]" 17;
+IO_PORT "leds[2]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+
+IO_LOC "leds[3]" 18;
+IO_PORT "leds[3]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+
+IO_LOC "leds[4]" 19;
+IO_PORT "leds[4]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+
+IO_LOC "leds[5]" 20;
+IO_PORT "leds[5]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;

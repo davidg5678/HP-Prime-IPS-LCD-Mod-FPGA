@@ -202,31 +202,133 @@ Other reference points (not yet wired into any target):
 | `btn[1]` (second button) | 87 | ⚠️ `MODE1` config strap — see above |
 | RGB LED | 79 | `WS2812`, has an LED attached |
 
-## Reserved for Phase 3 (parallel RGB LCD header, 40-pin connector)
+## Used by `lcd_panel` (Phase 3, parallel RGB LCD header, 40-pin connector)
 
 **Verified 2026-08-02 against the DISPLAY sheet of `docs/Tang_Nano_20K_3923_Schematics-1.pdf`,
 which is the board's own wiring and therefore panel-independent.** The previous version of this
 table came from Sipeed's `rgb_lcd/lcd_480_272/color_bar` example and carried a "re-verify before
 relying on this" caveat; it is now confirmed and the low-order colour bits are documented.
 
-| Signal | FPGA pins | Notes |
-|---|---|---|
-| `LCD_R7..R3` | 38, 39, 40, 41, 42 | R2..R0 are tied to GND at the connector — 5 bits of red |
-| `LCD_G7..G2` | 32, 33, 34, 35, 36, 37 | G1..G0 tied to GND — 6 bits of green |
-| `LCD_B7..B3` | 27, 28, 29, 30, 31 | B2..B0 tied to GND — 5 bits of blue |
-| `LCD_CK` | 77 | also `GCLKT_1` |
-| `LCD_HS` | 25 | |
-| `LCD_VS` | 26 | |
-| `LCD_DE` | 48 | |
-| `LCD_BL` | 49 | backlight regulator enable |
-| `LCD_INT0..3` | 15, 16, 17, 18 | ⚠ shared with `leds[0..3]` |
+| Signal | FPGA pins | RTL port | Notes |
+|---|---|---|---|
+| `LCD_R7..R3` | 38, 39, 40, 41, 42 | `lcd_r[4:0]` | R2..R0 are tied to GND at the connector — 5 bits of red |
+| `LCD_G7..G2` | 32, 33, 34, 35, 36, 37 | `lcd_g[5:0]` | G1..G0 tied to GND — 6 bits of green |
+| `LCD_B7..B3` | 27, 28, 29, 30, 31 | `lcd_b[4:0]` | B2..B0 tied to GND — 5 bits of blue |
+| `LCD_CK` | 77 | `lcd_ck` | also `GCLKT_1` |
+| `LCD_HS` | 25 | `lcd_hs` | active low |
+| `LCD_VS` | 26 | `lcd_vs` | active low |
+| `LCD_DE` | 48 | `lcd_de` | active high |
+| `LCD_BL` | 49 | `lcd_bl` | backlight regulator enable — ⚠️ **pulled up on the board, see below** |
+| `LCD_INT0..3` | 15, 16, 17, 18 | — | ⚠ shared with `leds[0..3]` |
 
 So the connector is a **RGB565** interface — 5:6:5 is a property of the board's wiring, not of
 whichever panel is plugged in. Twenty pins, plus the backlight.
 
-⚠️ `LCD_INT0..3` share pins 15–18 with four of the six onboard LEDs. If Phase 3's panel needs
-those interrupt lines (touch, typically), those LEDs must be given up. `la_capture` uses all six
-as status indicators today; nothing has had to choose yet.
+### Which LCD signals reach the 2×20 headers — and which do not
+
+From the Pinout diagram on page 5 of `docs/Sipeed Tang nano 20K Datasheet V1.3-en_US-1.pdf`, which
+is the authoritative source for this and settles it in a way the schematic netlist does not. The
+headers expose **34 free IOs** (the datasheet says so explicitly, and counting the diagram's
+numbered pads gives exactly 34).
+
+Of the 21 LCD-connector signals, **twelve are on the headers and nine are not**:
+
+| On the headers | Not on the headers (FFC socket only) |
+|---|---|
+| `LCD_CK` 77, `LCD_HS` 25, `LCD_VS` 26, `LCD_DE` 48 | `LCD_G7..G2` — pins 32, 33, 34, 35, 36, 37 |
+| `LCD_BL` 49 | `LCD_R7` 38, `LCD_R6` 39, `LCD_R5` 40 |
+| `LCD_B7..B3` — 27, 28, 29, 30, 31 | |
+| `LCD_R4` 41, `LCD_R3` 42 | |
+
+**The entire green channel and the top three red bits exist only at the FFC socket.** Any attempt
+to drive a panel through jumper wires from the headers therefore cannot reproduce the board's
+RGB565 wiring pin-for-pin — though it can reassign *other* header IOs to those colour bits, since
+which FPGA pin carries which signal is a `.cst` choice.
+
+Budget for that approach: 34 IOs, minus the three that belong to the BL616 (75, 76, 86), leaves
+**31 usable**. A full RGB565 panel drive needs 20 colour + 4 sync + 1 backlight = **25**, leaving 6
+— which is not enough for Phase 4's twelve probes. RGB444 (12 colour + 5 = 17) leaves 14 and does
+fit alongside the probes.
+
+**`VLED+` and `VLED-` are NOT on the headers.** They exist only at FFC positions 1 and 2, so a
+header-only wiring scheme has no access to the board's 19 V backlight supply and needs an external
+constant-current driver. `3V3` and `GND` *are* on both header columns, so panel VDD is fine.
+
+### ⚠️ A reversed FFC cannot be fixed in software
+
+Worth stating explicitly, because it is the first thing anyone asks after discovering an A/B
+contact-orientation mismatch. Flipping the cable makes board pin *N* mate with panel pin *41−N*,
+and the collisions that creates are power collisions, not signal ones:
+
+| Panel pin | Wants | Would receive |
+|---|---|---|
+| 4 (VDD) | +3V3 at tens of mA | board pin 37 = `LCD_INT0` = FPGA pin 15 |
+| 2 (LEDA) | ~19 V backlight anode | board pin 39 = `LCD_INT2` = FPGA pin 17 |
+| 29 (GND) | ground | board pin 12 = `LCD_R7` = FPGA pin 38 |
+
+A `.cst` can reassign which FPGA pin carries which *signal*. It cannot make an FPGA I/O pad supply
+the panel's VDD rail, source 19 V, or act as a ground return. The fix is a reversing (type A ↔
+type B) 40-pin 0.5 mm FFC, or a breakout that lets the mapping be rewired by hand.
+
+### ⚠️ Pin 49 is pulled UP on the board — the backlight defaults ON
+
+Measured from the DISPLAY sheet, 2026-08-03. The LP3320 boost converter's `EN` pin carries
+**R29 = 27 kΩ to +3V3**, and the FPGA drives it through **R30 = 100 Ω**:
+
+```
+EN ──┬── R29 27K ── +3V3
+     └── R30 100R ── FPGA pin 49
+```
+
+Consequences, none of them obvious:
+
+- **Only an actively driven low turns the backlight off.** `PULL_MODE=DOWN` in a `.cst` does not
+  do it — the device's internal pulldown is ~50 kΩ and loses to an external 27 kΩ pull-up.
+- **Every bitstream that does not assign pin 49 leaves the converter enabled**, including
+  `la_capture`, `frame_capture`, `frame_stream` and an unconfigured FPGA.
+- The converter's feedback comes from R31 = 5.6 Ω in series with the *panel's* LED string, so with
+  no panel mated there is no current, FB never reaches threshold, and it drives to maximum into an
+  open circuit. `lcd_panel` therefore ships with `BL_DUTY_INIT = 0`; the backlight is opt-in
+  (`make lcd-hw BL=64`).
+
+### ⚠️ The onboard WS2812 latches — and shares a pin with `probe[8]`
+
+The RGB LED on pin 79 holds whatever colour it was last sent, indefinitely. An unassigned pin 79
+floats, picks up noise and leaves it lit at some arbitrary bright colour; tying it low does **not**
+clear it, because a permanently low line is simply an endless inter-frame gap. The only way to make
+it dark is to send 24 zero bits — `src/common/ws2812_off.v`, used by `lcd_panel`.
+
+**Pin 79 is also `probe[8]` — the HP Prime's D4 — in every capture target.** A design that captures
+cannot also silence this LED. Phase 4 lives with a lit RGB LED.
+
+### ⚠️ The bit order runs backwards relative to the pin numbers
+
+The schematic names run HIGH to LOW across **ascending** pin numbers: `LCD_R7..R3` is pins
+38, 39, 40, 41, 42, so **pin 38 is R7 (the MSB) and pin 42 is R3 (the LSB)**. The `.cst` therefore
+maps `lcd_r[4]`→38 down to `lcd_r[0]`→42, which looks like a transcription error and is not.
+
+Reversing a channel does not black the screen — it produces a picture with plausible-looking wrong
+colours, which is this project's recurring failure mode. `test_pattern.v`'s RAMPS pattern
+(`make lcd-hw PATTERN=2`) exists to make it visible: a reversed channel turns a smooth ramp into a
+staircase that jumps backwards, where colour bars would look merely "wrong" without saying how.
+
+### `LCD_INT0..3` vs the LEDs — resolved for this panel
+
+⚠️ `LCD_INT0..3` share pins 15–18 with four of the six onboard LEDs. On the AFY320240A0 those four
+connector positions (37–40) are `XR/YD/XL/YU` — **resistive**-touch pins the datasheet marks NC,
+with nothing connected at the far end — so `lcd_panel` drives all six LEDs and that is harmless.
+This panel's touch controller is capacitive and lives on a *separate* 6-pin FFC that the 40-pin
+connector does not carry at all.
+
+A panel with resistive touch, or any future use of that second FFC, would force giving up those
+four LEDs. Re-check before adding any panel-side input.
+
+### Bank voltage: confirmed by a build that actually assigns these pins
+
+`impl/pnr/project.rpt.txt` used to list pins 25–42 as `LVCMOS18` with `BankVccio 1.8`, and the
+section above argues that was the tool's default for banks holding **no assigned I/O**. The
+`lcd_panel` build assigns them, and every one now reports `LVCMOS33` / `3.3`. The argument is no
+longer an inference.
 
 The onboard BL616 MCU provides the composite USB device (DirtyJTAG-v2 JTAG + CDC-ACM UART) —
 no external USB-serial adapter is needed for the UART path above. Confirmed working; see the
