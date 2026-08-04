@@ -5,8 +5,10 @@ PPM          ?=
 PATTERN      ?=
 BL           ?=
 LEDS         ?=
+MODE         ?=
+WATCH        ?=
 
-.PHONY: sim build build-oss flash flash-sram selftest-hw capture-hw sdram-hw frame-hw stream-hw lcd-hw check-env clean
+.PHONY: sim build build-oss flash flash-sram selftest-hw capture-hw sdram-hw frame-hw stream-hw lcd-hw pass-hw check-env clean
 
 sim:          ; tools/sim/run_sim.sh $(SIM_TARGET)
 build:        ; tools/build/gowin_build.sh $(BUILD_TARGET)
@@ -38,5 +40,22 @@ stream-hw:    ; python3 python/tools/frame_stream.py $(if $(PORT),--port $(PORT)
 #                 MEASURE THE LED CURRENT before raising it; see
 #                 docs/panel_afy320240a0.md.
 lcd-hw:       ; python3 python/tools/lcd_panel.py $(if $(PORT),--port $(PORT)) $(if $(PATTERN),--pattern $(PATTERN)) $(if $(BL),--backlight $(BL)) $(if $(LEDS),--leds $(LEDS))
+# Phase 4: control and telemetry for the live passthrough. Needs
+# `make flash-sram BUILD_TARGET=passthrough` first, the probes attached to the
+# Prime and the panel on J2.
+#
+# YOU DO NOT NEED THIS TO USE THE PASSTHROUGH. The bitstream powers up in AUTO:
+# mock pattern until a captured frame lands, then live passthrough, on its own,
+# with no host. `make flash BUILD_TARGET=passthrough` makes that survive a power
+# cycle. This target is for when it does NOT happen -- the report separates "the
+# calculator is not driving" from "the panel path is broken", which look
+# identical on the glass. It carries no pixels; Phase 2's UART streaming is
+# retired and is not coming back.
+#   MODE=auto|mock|real  force the pixel source (auto = the power-on behaviour)
+#   PATTERN=0..7         mock image, as lcd-hw
+#   BL=0..255            backlight. USE 255 -- intermediate values do not work
+#                        on this board (LP3320 soft-start); see PROGRESS.md.
+#   WATCH=<seconds>      poll for this long instead of the default 0.5 s
+pass-hw:      ; python3 python/tools/passthrough.py $(if $(PORT),--port $(PORT)) $(if $(MODE),--mode $(MODE)) $(if $(PATTERN),--pattern $(PATTERN)) $(if $(BL),--backlight $(BL)) $(if $(WATCH),--watch $(WATCH))
 check-env:    ; tools/setup/check_env.sh
 clean:        ; rm -rf impl build_oss sim/.build

@@ -88,14 +88,43 @@ is the reference implementation; later phases copy this pattern rather than rein
   opposite contact types (A vs B), which no amount of software can correct — a flipped cable lands
   the panel's VDD, GND and 19 V backlight rail on FPGA I/O pads. See `boards/tangnano20k/pinout.md`.
 
-- **Phase 4 — live passthrough. Written and passing simulation end to end; not synthesised, not on
-  hardware.** `src/targets/passthrough/` composes Phase 1's capture path into Phase 3's driver path,
+- **Phase 4 — live passthrough. DONE, on hardware.** The HP Prime's screen is reproduced on the
+  replacement panel in real time, entirely inside the FPGA. It worked on the first hardware attempt.
+  `make pass-hw` → `PASS: passthrough emitting 320x240 in 371x260 at 62.2 Hz (62.7 fps wall-clock);
+  source 320x240 at 18.9 fps, LIVE PASSTHROUGH on the panel`.
+  `src/targets/passthrough/` composes Phase 1's capture path into Phase 3's driver path,
   with the runtime mux selecting {mock→LCD} or {live HP Prime capture→LCD} in one bitstream.
+
+  **The power-on default is AUTO, not MOCK — the one place this project departs from the mock-mode
+  convention, deliberately.** AUTO shows the test pattern until a captured frame has been *swapped*
+  to the reader, then switches to the live passthrough by itself and stays there. Forced MOCK/REAL
+  still override absolutely. The reason is that this phase's deliverable is a standalone box —
+  calculator in, panel out, no computer — and a bitstream that waits for a host command cannot be
+  one. AUTO is also strictly more diagnostic than defaulting to REAL: with the calculator not
+  driving, REAL shows black, which is indistinguishable from a dead bitstream, an unseated FFC or a
+  backlight at zero, while AUTO shows GRID and thereby reports "everything except the calculator is
+  working". `python/tools/passthrough.py` (`make pass-hw`) carries control and telemetry only, a few
+  bytes per second; **the pixels never touch the host and Phase 2's UART streaming is retired.**
   `src/common/prime_pixel.v` turns the sampled bus into addressed RGB565 pixels; a double-buffered
   frame store in SDRAM does the retiming; buffers exchange at the *panel's* frame boundary so no
-  frame tears. Two buffers suffice only because the panel (62.2 Hz) is strictly faster than the
-  calculator (37.7 Hz) — the invariant that encodes it is asserted on every clock in the testbench.
-  Combined SDRAM load is 3.84 MW/s of ~10.8 MW/s, so no burst mode is needed.
+  frame tears. Combined SDRAM load is 3.84 MW/s of ~10.8 MW/s, so no burst mode is needed.
+
+  **Correction, measured at the bench: two buffers do NOT suffice to capture every frame.** The
+  original claim — that the panel (62.2 Hz) being strictly faster than the calculator (37.7 Hz)
+  makes two enough — is subtly wrong. Reader-faster-than-writer guarantees a completed capture is
+  *collected* in time; it does not make a buffer *available* at the instant the writer needs one.
+  `ev_done` coincides with the next source frame's start, and at that moment one buffer holds the
+  just-finished capture awaiting the panel swap while the other is being displayed, so the writer
+  skips that frame and re-arms at the following one. Result: **18.9 fps captured against 37.7 Hz,
+  exactly half.** A third buffer fixes it and the SDRAM has ample room (8 MB; 150 KB per buffer).
+
+  Two things about how this was found. It was caught **only** by timing the FPGA's own frame counter
+  against host wall-clock — its internal view is perfectly self-consistent at 18.9 — which is the
+  same two-instruments argument `docs/prime_lcd_protocol.md` uses for the Prime's frame rate, paying
+  off a second time. And **simulation could not have found it**: the testbench runs the source
+  *faster* than the panel, the inverse regime, where the effect does not arise. The no-tearing
+  invariant the testbench *does* assert on every clock held perfectly; it was simply not the
+  property that mattered here.
 
   **This cannot be a wire-through, and that is now measured rather than anticipated.** Every
   temporal figure of the Prime's output is illegal for the panel: DOTCLK 13.1 MHz against a

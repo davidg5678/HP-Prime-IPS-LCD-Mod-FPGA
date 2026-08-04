@@ -50,7 +50,9 @@ module tb_passthrough;
     localparam integer EXP_V_TOTAL = 260, EXP_V_ACTIVE = 240;
 
     localparam [7:0] CMD_RESET = 8'hAA, CMD_MOCK = 8'h4D, CMD_REAL = 8'h52,
-                     CMD_PATTERN = 8'h50, CMD_BL = 8'h42, CMD_STATUS = 8'h53;
+                     CMD_PATTERN = 8'h50, CMD_BL = 8'h42, CMD_STATUS = 8'h53,
+                     CMD_AUTO = 8'h41;
+    localparam integer MODE_AUTO = 0, MODE_MOCK = 1, MODE_REAL = 2;
 
     reg clk = 1'b0;
     always #(CLK27_NS/2.0) clk = ~clk;
@@ -182,6 +184,24 @@ module tb_passthrough;
     wire [15:0] got_rgb = {lcd_r, lcd_g, lcd_b};
     reg  [15:0] want_rgb;
 
+    // Which effective mode was in force while pixels were actually being
+    // DISPLAYED, accumulated across the check window.
+    //
+    // These replaced a point-sample of dut.mode_real taken after
+    // `wait (frames == f0+1)`, which failed while every pixel check passed --
+    // a contradiction that could only mean the sample, not the pixels, was
+    // wrong. `frames` counts VSYNC edges observed at the PINS, whereas
+    // mode_real is latched on the timing generator's internal frame tick a few
+    // cycles EARLIER, so the sample landed one frame boundary late. That is the
+    // same pin-versus-internal skew the REAL-mode comment below records for
+    // ev_swap; it is apparently very easy to reintroduce.
+    //
+    // Gating on lcd_de removes the skew entirely rather than compensating for
+    // it: it only looks at cycles where the mux's output is on the glass, and
+    // it asserts over the WHOLE frame instead of at one instant, so a mode that
+    // flipped mid-scan would be caught too.
+    reg saw_real_px, saw_mock_px;
+
     always @(posedge lcd_ck) begin
         if (!lcd_vs && vs_d) begin
             frame_px_at_end = px_this_frame;
@@ -197,6 +217,14 @@ module tb_passthrough;
             ck_in_line = 0;
         end else begin
             ck_in_line = ck_in_line + 1;
+        end
+
+        // Blocking, to match the counters in this block -- these are testbench
+        // bookkeeping, and the main process clears them with blocking
+        // assignments between windows.
+        if (lcd_de && check_mode != 0) begin
+            if (dut.mode_real) saw_real_px = 1'b1;
+            else               saw_mock_px = 1'b1;
         end
 
         if (lcd_de) begin
@@ -286,54 +314,63 @@ module tb_passthrough;
         repeat (40) @(posedge clk);
         src_rst_n <= 1'b1;          // the calculator starts driving
 
-        // ---- MOCK is the power-on default. Check a complete panel frame of it
-        // first: this proves the mux and the panel path inside the COMBINED
-        // bitstream, which is the thing sim/targets/lcd_panel cannot speak to.
+        // ===================================================================
+        // PHASE 1 -- AUTO before any captured frame exists.
+        //
+        // The power-on default is AUTO, and with no complete capture swapped in
+        // yet it must resolve to the MOCK pattern. This is the reading that
+        // makes a dark bench diagnosable: a panel showing GRID says the FPGA,
+        // the FFC and the whole output path are fine and only the calculator is
+        // missing. NOTHING IS SENT OVER THE UART in this phase -- that is the
+        // point, since the shipped box has no host attached.
+        //
+        // Timing, so the window is understood rather than tuned: the source
+        // completes a frame every ~3 ms, but have_frame is only set when a
+        // buffer is SWAPPED, which happens on a panel frame tick (~16 ms), and
+        // mode_real samples the pre-swap value on that same edge. So the first
+        // TWO panel frames are MOCK and the switch lands on the third.
+        // ===================================================================
         wait (frames >= 1);
         @(posedge lcd_ck);
+        saw_real_px = 0; saw_mock_px = 0;
         check_mode = 1;
         f0 = frames;
         wait (frames == f0 + 1);
         @(posedge lcd_ck);
         check_mode = 0;
 
-        $display("--- MOCK mode: internal pattern -> panel ---");
+        $display("--- AUTO, no capture yet: internal pattern -> panel ---");
         chk_i("DCLKs per line",      m_h_total,       EXP_H_TOTAL);
         chk_i("lines per frame",     m_v_total,       EXP_V_TOTAL);
         chk_i("active pixels/frame", frame_px_at_end, EXP_H_ACTIVE * EXP_V_ACTIVE);
         chk_i("pixels checked",      px_checked,      EXP_H_ACTIVE * EXP_V_ACTIVE);
         chk_i("pixel mismatches",    px_bad,          0);
         chk_i("non-zero bus outside DE", blank_bad,   0);
+        chk_i("no REAL pixel displayed all frame", saw_real_px, 0);
+        chk_i("MOCK pixels were displayed",        saw_mock_px, 1);
 
-        // ---- switch to the live passthrough.
-        $display("--- REAL mode: HP Prime -> SDRAM -> panel ---");
-        uart_send(CMD_REAL);
-
-        // Let two complete panel frames pass before inspecting anything. A
-        // buffer exchange happens at every panel frame boundary for which a
-        // capture is waiting, and the source completes a frame every ~3 ms
-        // against the panel's 16 ms, so after two frames the presented buffer
-        // certainly holds a complete capture.
+        // ===================================================================
+        // PHASE 2 -- AUTO switches itself to the live passthrough.
         //
-        // An earlier version synchronised on the DUT's internal ev_swap pulse
-        // instead. That was wrong in an instructive way: ev_swap fires on the
-        // timing generator's frame tick, several cycles BEFORE the testbench
-        // observes the VSYNC edge at the pins, so `frames` incremented
-        // immediately afterwards and the check window opened and closed at the
-        // top of the frame -- 0 pixels checked, while every other check passed.
-        // Counting frames at the pins removes the DUT-internal dependency and
-        // the skew along with it.
+        // Still no UART traffic. If this passes, the bitstream is a standalone
+        // box: power on, calculator in, panel out. That is the entire point of
+        // Phase 4, and it is checked here by waiting rather than by commanding.
+        // ===================================================================
+        $display("--- AUTO switches itself: HP Prime -> SDRAM -> panel ---");
         @(posedge lcd_ck);
         f0 = frames;
         wait (frames == f0 + 2);
         @(posedge lcd_ck);
         px_checked = 0; px_bad = 0; blank_bad = 0;
+        saw_real_px = 0; saw_mock_px = 0;
         check_mode = 2;
         f0 = frames;
         wait (frames == f0 + 1);
         @(posedge lcd_ck);
         check_mode = 0;
 
+        chk_i("switched with no host command", saw_real_px, 1);
+        chk_i("no MOCK pixel displayed all frame", saw_mock_px, 0);
         chk_i("captured pixels checked", px_checked, SRC_W * SRC_H);
         chk_i("captured pixel mismatches", px_bad,   0);
         chk_i("non-zero bus outside DE",  blank_bad, 0);
@@ -344,13 +381,27 @@ module tb_passthrough;
         $display("--- status report ---");
         read_report;
         chk_i("magic",            rpt[0], 8'hA5);
-        chk_i("version",          rpt[1], 8'h06);
+        chk_i("version",          rpt[1], 8'h07);
         chk_i("pll_lock bit",     rpt[2]       & 1, 1);
         chk_i("sdram_init bit",  (rpt[2] >> 1) & 1, 1);
-        chk_i("mode==REAL bit",  (rpt[2] >> 2) & 1, 1);
+        chk_i("effective mode==REAL bit", (rpt[2] >> 2) & 1, 1);
         chk_i("panel-running bit",(rpt[2] >> 4) & 1, 1);
         chk_i("writer overrun bit",(rpt[2] >> 5) & 1, 0);
         chk_i("reader underrun bit",(rpt[2] >> 6) & 1, 0);
+        // Requested mode is still AUTO even though the effective mode is REAL.
+        // These two disagreeing is the whole diagnostic value of byte 5.
+        chk_i("requested mode still AUTO", rpt[5] & 3,        MODE_AUTO);
+        chk_i("have_frame bit",           (rpt[5] >> 2) & 1,  1);
+
+        // The SHIPPED backlight default, read back off the wire rather than
+        // asserted about the source. It must be 0: PWM dimming does not work on
+        // this board (the pin is the LP3320's ENABLE and 25% duty never clears
+        // soft-start), so any nonzero-but-not-255 default produces a dark panel
+        // while this very report claims the backlight is on. The testbench
+        // overrides BL_DELAY_CYCLES for runtime but deliberately does NOT
+        // override BL_DUTY_INIT, so this checks what hardware will get.
+        chk_i("shipped backlight duty", rpt[4], 0);
+        chk_i("backlight-on bit",      (rpt[2] >> 3) & 1, 0);
         chk_i("reported DCLKs per line",  rpt16(6),  EXP_H_TOTAL);
         chk_i("reported active DCLKs",    rpt16(8),  EXP_H_ACTIVE);
         chk_i("reported lines per frame", rpt16(10), EXP_V_TOTAL);
@@ -363,21 +414,58 @@ module tb_passthrough;
             errors = errors + 1;
         end else $display("  ok  source frames captured = %0d", rpt16(16));
 
-        // ---- back to MOCK: the mux must work in both directions.
-        $display("--- back to MOCK ---");
+        // ===================================================================
+        // PHASE 3 -- the host override, in both directions.
+        //
+        // CMD_MOCK must WIN over AUTO even though have_frame is set and AUTO
+        // would choose REAL. A forced mode has to be absolute, or "put the test
+        // pattern up so I can check the panel wiring" stops being available
+        // exactly when a capture is running -- which is precisely when you want
+        // to ask whether a wrong-looking image is the panel's fault or the
+        // calculator's.
+        // ===================================================================
+        $display("--- forced MOCK overrides AUTO ---");
         uart_send(CMD_MOCK);
         @(posedge lcd_ck);
         f0 = frames;
         wait (frames == f0 + 1);       // let the change land on a frame boundary
         @(posedge lcd_ck);
         px_checked = 0; px_bad = 0;
+        saw_real_px = 0; saw_mock_px = 0;
         check_mode = 1;
         f0 = frames;
         wait (frames == f0 + 1);
         @(posedge lcd_ck);
         check_mode = 0;
-        chk_i("pixels checked back in MOCK", px_checked, EXP_H_ACTIVE * EXP_V_ACTIVE);
-        chk_i("pixel mismatches back in MOCK", px_bad,   0);
+        chk_i("forced MOCK beat AUTO",         saw_real_px, 0);
+        chk_i("pixels checked back in MOCK",   px_checked, EXP_H_ACTIVE * EXP_V_ACTIVE);
+        chk_i("pixel mismatches back in MOCK", px_bad,     0);
+
+        read_report;
+        chk_i("requested mode now MOCK",  rpt[5] & 3,       MODE_MOCK);
+        chk_i("effective mode==REAL bit", (rpt[2] >> 2) & 1, 0);
+        chk_i("have_frame still set",     (rpt[5] >> 2) & 1, 1);
+
+        // ---- forced REAL, the documented diagnostic command.
+        $display("--- forced REAL ---");
+        uart_send(CMD_REAL);
+        @(posedge lcd_ck);
+        f0 = frames;
+        wait (frames == f0 + 2);
+        chk_i("forced REAL took effect", dut.mode_real, 1);
+        read_report;
+        chk_i("requested mode now REAL", rpt[5] & 3, MODE_REAL);
+
+        // ---- and CMD_AUTO hands control back. have_frame is still set, so
+        // AUTO resolves straight to REAL rather than dropping through MOCK.
+        $display("--- CMD_AUTO returns control to the bitstream ---");
+        uart_send(CMD_AUTO);
+        @(posedge lcd_ck);
+        f0 = frames;
+        wait (frames == f0 + 2);
+        chk_i("AUTO resolves to REAL", dut.mode_real, 1);
+        read_report;
+        chk_i("requested mode back to AUTO", rpt[5] & 3, MODE_AUTO);
 
         if (invariant_bad) begin
             $display("FAIL: wr_active and wdone were set simultaneously -- the swap logic's mutual-exclusion invariant does not hold");
@@ -390,15 +478,23 @@ module tb_passthrough;
             $fatal(1);
         end
 
-        $display("PASS: passthrough -- %0d x %0d source pixels captured from a %0d-DOTCLK line at 37.7 Hz-class timing, buffered in SDRAM and re-emitted exactly on %0d x %0d panel timing at 62 Hz, mux verified in both directions, 0 overruns, 0 underruns",
-                 SRC_W, SRC_H, P_H_TOTAL, EXP_H_TOTAL, EXP_V_TOTAL);
+        // The summary states the source geometry it ACTUALLY ran, not the one
+        // it resembles. An earlier version of this line claimed "37.7 Hz-class
+        // timing", which was true of the LINE (1361 DOTCLKs, real porches) and
+        // false of the FRAME: 30 lines repeats at ~325 Hz, five times FASTER
+        // than the panel, where the real calculator is slower. That matters
+        // because the double buffer's sufficiency argument rests on the reader
+        // being the faster party, so the summary named the one regime the run
+        // never entered. See the note above P_V_TOTAL.
+        $display("PASS: passthrough -- %0d x %0d source pixels captured from a real %0d-DOTCLK line (%0d-line frame, source faster than panel), buffered in SDRAM and re-emitted exactly on %0d x %0d panel timing at 62 Hz; AUTO reached the live passthrough with no host command, forced MOCK/REAL/AUTO all verified, 0 overruns, 0 underruns",
+                 SRC_W, SRC_H, P_H_TOTAL, P_V_TOTAL, EXP_H_TOTAL, EXP_V_TOTAL);
         $finish;
     end
 
-    // Five panel frames at 62 Hz is ~80 ms, plus UART. 200 ms leaves room
-    // without hiding a hang.
+    // Twelve panel frames at 62 Hz is ~195 ms, plus four status reports and the
+    // AUTO settling time. 320 ms leaves room without hiding a hang.
     initial begin
-        #200_000_000;
+        #320_000_000;
         $display("FAIL: watchdog -- %0d panel frames, check_mode %0d, %0d checked, %0d bad, %0d errors",
                  frames, check_mode, px_checked, px_bad, errors);
         $fatal(1);

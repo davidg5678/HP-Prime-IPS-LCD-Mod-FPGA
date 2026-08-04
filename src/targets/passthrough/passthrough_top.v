@@ -61,17 +61,48 @@
 // 37.7 Hz into 62.2 Hz means some frames are shown twice regardless.
 //
 // ---------------------------------------------------------------------------
-// MOCK/REAL, per CLAUDE.md
+// AUTO / MOCK / REAL, and why the default is not MOCK here
 // ---------------------------------------------------------------------------
 // Both pixel sources are instantiated and BOTH RUN CONTINUOUSLY; only the final
-// mux is switched, at runtime, defaulting to MOCK at reset. Running the capture
-// path even in MOCK mode is deliberate -- the status report's source-frame
+// mux is switched, at runtime. Running the capture path even while the panel
+// shows the mock pattern is deliberate -- the status report's source-frame
 // counter then answers "is the calculator actually connected and driving?"
 // without disturbing what is on the panel, which is the first question to ask
 // when a passthrough shows nothing.
 //
+// CLAUDE.md's mock-mode convention says the runtime mux defaults to MOCK at
+// power-on, and for Phases 1 and 3 that is right: bring-up should prove the
+// output path before trusting the input path. But this phase's PURPOSE is to be
+// a standalone box -- calculator in, panel out, no computer anywhere -- and a
+// bitstream that sits on a test pattern until a host sends 0x52 cannot do that
+// job at all. The convention's real content is "both paths in ONE bitstream,
+// switchable at runtime without re-synthesising", and that is preserved
+// exactly. Only the DEFAULT changes, and it changes to something strictly more
+// informative than either fixed choice:
+//
+//     MODE_AUTO (reset default)  mock pattern until a complete captured frame
+//                                has been swapped in, then live passthrough,
+//                                and it stays there.
+//     MODE_MOCK                  forced test pattern.
+//     MODE_REAL                  forced passthrough.
+//
+// AUTO beats defaulting to REAL because of what each one shows when the
+// calculator ISN'T driving: REAL shows black, which is indistinguishable from a
+// dead bitstream, an unseated FFC or a backlight left at zero -- the least
+// informative failure mode in existence, and the one docs/verification.md is
+// written against. AUTO shows the GRID pattern, which says "the FPGA is alive,
+// the panel is wired, the output path works, and the thing that is missing is
+// the calculator." That is a diagnosis rather than a mystery, delivered with no
+// host attached.
+//
+// The switch is gated on `have_frame` -- set when a captured buffer has been
+// SWAPPED to the reader, not merely captured -- and is latched at the panel's
+// frame boundary, so the changeover cannot tear a frame or present a buffer
+// that is still being filled.
+//
 // HOST PROTOCOL
-//     0xAA        reset
+//     0xAA        reset (returns the mux to AUTO)
+//     0x41  'A'   force AUTO  (the power-on behaviour described above)
 //     0x4D  'M'   force MOCK  (internal test pattern -> panel)
 //     0x52  'R'   force REAL  (captured frame buffer -> panel)
 //     0x50  'P'+1 select mock pattern, next byte = index
@@ -80,13 +111,20 @@
 //
 // REPORT (24 bytes, little-endian, prefix 'S')
 //     0      0xA5 magic
-//     1      0x06 protocol version
-//     2      status: bit0 pll_lock, bit1 sdram_init, bit2 mode==REAL,
+//     1      0x07 protocol version
+//     2      status: bit0 pll_lock, bit1 sdram_init, bit2 EFFECTIVE mode==REAL,
 //                    bit3 backlight on, bit4 panel running,
 //                    bit5 writer overrun, bit6 reader underrun
 //     3      mock pattern index
 //     4      backlight duty
-//     5      reserved
+//     5      mux: bits1:0 REQUESTED mode (0 AUTO, 1 MOCK, 2 REAL),
+//                 bit2 have_frame (a captured buffer has been swapped in)
+//
+//            Byte 5 and bit 2 of byte 2 are deliberately separate. In AUTO they
+//            disagree until the first frame lands, and that disagreement is the
+//            single most useful reading in the report: "requested AUTO,
+//            effective MOCK, have_frame 0" says the calculator is not driving,
+//            which is a different fault from "effective REAL, 0 source frames".
 //     6..7   panel DCLKs per line          expect 371
 //     8..9   panel active DCLKs per line   expect 320
 //     10..11 panel lines per frame         expect 260
@@ -101,7 +139,25 @@
 //
 module passthrough_top #(
     parameter integer BL_DELAY_CYCLES = 27_000_000,   // 250 ms at 108 MHz
-    parameter [7:0]   BL_DUTY_INIT    = 8'd64
+    // BACKLIGHT OFF AT RESET -- do not "helpfully" raise this. Measured on
+    // hardware during Phase 3 (PROGRESS.md 2026-08-04), from both directions:
+    //
+    //   * PWM DIMMING DOES NOT WORK ON THIS BOARD. The pin drives the LP3320's
+    //     ENABLE, not a dimming input. At ~1 kHz and 25% duty the 250 us
+    //     on-time is shorter than the converter's soft-start, so it never
+    //     reaches regulation: the panel stays DARK while the status report says
+    //     the backlight is ON. That is the worst possible combination, and an
+    //     earlier version of this file shipped exactly it (BL_DUTY_INIT = 64).
+    //     BL = 255 (99.6%, effectively static) is the working setting.
+    //
+    //   * WITH NO PANEL MATED the boost drives an open circuit at maximum. Its
+    //     feedback comes from R31 in series with the PANEL's LED string, so
+    //     with no LED current FB never reaches threshold. A display driver must
+    //     not enable a boost into a load it cannot detect, and nothing on the
+    //     40-pin connector reports back.
+    //
+    // So the backlight is opt-in, exactly as src/targets/lcd_panel ships it.
+    parameter [7:0]   BL_DUTY_INIT    = 8'd0
 ) (
     input  wire        clk,       // pin 4, 27 MHz
     input  wire        uart_rx,   // pin 70
@@ -148,9 +204,17 @@ module passthrough_top #(
     localparam [20:0]  BUF_STRIDE = 21'd524288;
 
     localparam [7:0] CMD_RESET = 8'hAA, CMD_MOCK = 8'h4D, CMD_REAL = 8'h52,
-                     CMD_PATTERN = 8'h50, CMD_BL = 8'h42, CMD_STATUS = 8'h53;
-    localparam [7:0] HDR_MAGIC = 8'hA5, HDR_VERSION = 8'h06;
+                     CMD_PATTERN = 8'h50, CMD_BL = 8'h42, CMD_STATUS = 8'h53,
+                     CMD_AUTO = 8'h41;
+    // Version 7: byte 5 carries the requested mode + have_frame, which version
+    // 6 did not have. The version byte is also this project's cheapest hardware
+    // diagnostic -- a reply whose length and version do not match the target you
+    // think you flashed means the board reset and reconfigured from flash (see
+    // CLAUDE.md). Bump it whenever the report's meaning changes.
+    localparam [7:0] HDR_MAGIC = 8'hA5, HDR_VERSION = 8'h07;
     localparam [4:0] HDR_LAST  = 5'd23;
+
+    localparam [1:0] MODE_AUTO = 2'd0, MODE_MOCK = 2'd1, MODE_REAL = 2'd2;
 
     // ------------------------------------------------------------ clocking
     wire clk_s, pll_lock;
@@ -174,7 +238,7 @@ module passthrough_top #(
     );
 
     reg       do_reset, do_status;
-    reg       mode_real;
+    reg [1:0] mode_sel;               // what the HOST asked for
     reg [2:0] pattern;
     reg [7:0] bl_duty;
     reg       arg_wait, arg_is_bl;
@@ -182,7 +246,7 @@ module passthrough_top #(
     always @(posedge clk_s or negedge rst_n) begin
         if (!rst_n) begin
             do_reset <= 1'b0; do_status <= 1'b0;
-            mode_real <= 1'b0;            // MOCK at reset, per CLAUDE.md
+            mode_sel <= MODE_AUTO;        // standalone by default -- see header
             pattern <= 3'd0; bl_duty <= BL_DUTY_INIT;
             arg_wait <= 1'b0; arg_is_bl <= 1'b0;
         end else begin
@@ -193,10 +257,15 @@ module passthrough_top #(
                     if (arg_is_bl) bl_duty <= rx_data;
                     else           pattern <= rx_data[2:0];
                 end else case (rx_data)
-                    CMD_RESET:   do_reset  <= 1'b1;
+                    // CMD_RESET returns the mux to AUTO along with everything
+                    // else: a resync means "go back to the power-on state", and
+                    // leaving one register behind is how a resync stops being a
+                    // reliable way out of a confused state.
+                    CMD_RESET:   begin do_reset <= 1'b1; mode_sel <= MODE_AUTO; end
                     CMD_STATUS:  do_status <= 1'b1;
-                    CMD_MOCK:    mode_real <= 1'b0;
-                    CMD_REAL:    mode_real <= 1'b1;
+                    CMD_AUTO:    mode_sel <= MODE_AUTO;
+                    CMD_MOCK:    mode_sel <= MODE_MOCK;
+                    CMD_REAL:    mode_sel <= MODE_REAL;
                     CMD_PATTERN: begin arg_wait <= 1'b1; arg_is_bl <= 1'b0; end
                     CMD_BL:      begin arg_wait <= 1'b1; arg_is_bl <= 1'b1; end
                     default: ;
@@ -292,6 +361,13 @@ module passthrough_top #(
     reg [15:0] even_pix;
     reg [15:0] src_frames;
 
+    // Declared here rather than beside their always blocks below because
+    // iverilog treats use-before-declaration as a hard error where Gowin only
+    // warns (WARN EX3638) -- the divergence CLAUDE.md records, and the reason
+    // this file carries `default_nettype none.
+    reg        have_frame;   // a captured buffer has been SWAPPED to the reader
+    reg        mode_real;    // the EFFECTIVE mux setting, resolved from mode_sel
+
     // ------------------------------------------------------------- SDRAM
     wire        sd_ready, sd_rvalid, sd_init;
     wire [31:0] sd_rdata;
@@ -336,7 +412,7 @@ module passthrough_top #(
             sd_req <= 1'b0; sd_we <= 1'b0; sd_addr <= 21'd0; sd_wdata <= 32'd0;
             wbuf <= 1'b0; rbuf <= 1'b1; wdone <= 1'b0; wr_active <= 1'b0;
             wr_overrun <= 1'b0; rd_underrun <= 1'b0;
-            even_pix <= 16'd0; src_frames <= 16'd0;
+            even_pix <= 16'd0; src_frames <= 16'd0; have_frame <= 1'b0;
         end else if (do_reset) begin
             wf_wr <= 4'd0; wf_rd <= 4'd0;
             rf_wr <= 5'd0; rf_rd <= 5'd0;
@@ -344,13 +420,20 @@ module passthrough_top #(
             rd_loaded <= 1'b0; rd_half <= 1'b0;
             wbuf <= 1'b0; rbuf <= 1'b1; wdone <= 1'b0; wr_active <= 1'b0;
             wr_overrun <= 1'b0; rd_underrun <= 1'b0;
-            src_frames <= 16'd0;
+            src_frames <= 16'd0; have_frame <= 1'b0;
         end else begin
             // ---------------------------------------------------- buffer swap
             if (ev_swap) begin
                 rbuf  <= wbuf;
                 wbuf  <= ~wbuf;
                 wdone <= 1'b0;
+                // Sticky: from here on the reader's buffer holds a COMPLETE
+                // captured frame. This is what AUTO waits for -- not
+                // src_frames, which counts frames the writer has FINISHED, one
+                // of which may still be sitting unswapped in wbuf. Switching
+                // the mux on src_frames would present a buffer the panel has
+                // not been given yet.
+                have_frame <= 1'b1;
             end
             if (ev_done) begin
                 wdone      <= 1'b1;
@@ -457,6 +540,29 @@ module passthrough_top #(
         end
     end
 
+    // -------------------------------------------------- effective mux setting
+    //
+    // AUTO resolves to REAL once a captured buffer has actually been swapped to
+    // the reader; MOCK and REAL are absolute. The result is LATCHED AT THE
+    // PANEL'S FRAME BOUNDARY, for the same reason the buffer swap is: changing
+    // the pixel source mid-scan puts half a test pattern and half a captured
+    // image in one frame. It is visible, it looks like a corruption bug, and it
+    // costs one flip-flop to make impossible.
+    //
+    // The latch also buys a full frame of margin on the AUTO transition for
+    // free. ev_swap sets have_frame on a tg_frame edge, so this block samples
+    // the PRE-swap value on that same edge and only flips at the NEXT frame
+    // boundary -- by which point the reader has been streaming the new buffer
+    // for a whole frame. The mux can never reach a buffer mid-fill.
+    wire want_real = (mode_sel == MODE_REAL) ||
+                     ((mode_sel == MODE_AUTO) && have_frame);
+
+    always @(posedge clk_s or negedge rst_n) begin
+        if (!rst_n)        mode_real <= 1'b0;
+        else if (do_reset) mode_real <= 1'b0;
+        else if (tg_frame) mode_real <= want_real;
+    end
+
     // ------------------------------------------------------ pixel mux + pins
     wire [15:0] mock_pix = {pat_r, pat_g, pat_b};
     wire [15:0] real_pix = rd_loaded ? live_pix : 16'h0000;
@@ -560,7 +666,7 @@ module passthrough_top #(
                                bl_on, mode_real, sd_init, pll_lock};
             5'd3:  hdr_byte = {5'b0, pattern};
             5'd4:  hdr_byte = bl_duty;
-            5'd5:  hdr_byte = 8'h00;
+            5'd5:  hdr_byte = {5'b0, have_frame, mode_sel};
             5'd6:  hdr_byte = h_total_m[7:0];
             5'd7:  hdr_byte = h_total_m[15:8];
             5'd8:  hdr_byte = h_active_m[7:0];

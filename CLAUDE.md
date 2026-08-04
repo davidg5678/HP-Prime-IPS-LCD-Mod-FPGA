@@ -1,11 +1,17 @@
 # HP_PRIME_LCD — Claude Code Reference
 
 HP Prime calculator LCD reverse-engineering project on a Sipeed Tang Nano 20K
-(Gowin GW2AR-LV18QN88C8/I7). Four phases — see `docs/architecture.md`. Phase 1 (logic analyser)
-and the SDRAM controller are done and working on hardware; Phase 2 captures and decodes whole
-frames; **Phase 3 (panel driver) is DONE — the physical panel displays all eight test patterns.**
-**Phase 4 (passthrough) passes simulation end to end but has never been synthesised or run.** See `PROGRESS.md` for current status before assuming anything below has
+(Gowin GW2AR-LV18QN88C8/I7). Four phases — see `docs/architecture.md`. **ALL FOUR PHASES ARE DONE
+AND WORKING ON HARDWARE.** Phase 1 (logic analyser) and the SDRAM controller; Phase 2 captures and
+decodes whole frames; Phase 3 drives the physical panel; **Phase 4 (passthrough) reproduces the HP
+Prime's live screen on the replacement panel in real time, entirely inside the FPGA — worked on the
+first hardware attempt.** See `PROGRESS.md` for current status before assuming anything below has
 actually been run/verified this session.
+
+Known limitation, measured not assumed: the passthrough captures every **other** source frame
+(18.9 fps against the Prime's 37.7 Hz) because two frame buffers cannot free one at the instant the
+writer needs it. A third buffer fixes it; the SDRAM has room. Not visible as flicker — the panel
+still refreshes at 62.2 Hz.
 
 **The calculator's LCD bus is reverse-engineered and fully specified in
 `docs/prime_lcd_protocol.md`** — 320×240, 8-bit serial RGB, 3 DOTCLKs per pixel, component order
@@ -40,6 +46,13 @@ editing.
 | Flash to on-board flash (persistent) | `make flash` |
 | Hardware self-test over USB serial | `make selftest-hw` |
 | Phase 3 panel timing check + pattern select | `make lcd-hw` (add `PATTERN=0..7`, `BL=0..255`, `LEDS=on\|off`) |
+| Phase 4 passthrough control + telemetry | `make pass-hw` (add `MODE=auto\|mock\|real`, `PATTERN=0..7`, `BL=0..255`, `WATCH=<s>`) |
+
+**Host-side frame streaming over the UART is retired, not unfinished.** It topped out at 2.0–2.6 fps
+because the ceiling was per-request latency, not bit rate — raising the baud rate made it *worse*.
+Phase 4's video path is internal (Prime → SDRAM → panel) and the host is not in it. `make pass-hw`
+carries control and telemetry only, a few bytes per second. Do not revive `make stream-hw` for
+Phase 4 work.
 
 ## Toolchain paths
 
@@ -119,6 +132,19 @@ no way to establish framing. Mode bytes select the source for the *next* burst b
 variants — chosen specifically so an agent can flip between self-test and real-hardware modes
 without re-synthesizing or re-flashing. See `src/targets/bringup_selftest/` for the reference
 implementation. Full rationale in `docs/architecture.md`.
+
+**Phase 4 deliberately changes the DEFAULT, and only the default.** `passthrough_top.v` adds a
+third setting, **`AUTO` (`0x41` = 'A'), and makes it the power-on value**: the panel shows the
+mock pattern until a captured frame has been *swapped* to the reader, then switches to the live
+passthrough and stays there. Forced `MOCK`/`REAL` still override it absolutely, and both paths
+are still in one runtime-switchable bitstream — the convention's actual content is untouched.
+The reason for the change is that Phase 4's purpose is a **standalone box** — calculator in,
+panel out, no computer — and a bitstream that sits on a test pattern until a host sends `0x52`
+cannot do that job at all. AUTO also beats defaulting to plain `REAL`: when the calculator is not
+driving, `REAL` shows black, which is indistinguishable from a dead bitstream, an unseated FFC or
+a backlight left at zero, whereas AUTO shows GRID — "everything except the calculator is fine".
+`python/tools/passthrough.py` (`make pass-hw`) is control and telemetry only and is **not needed
+for normal use**; it carries no pixels.
 
 ## Known gotchas
 

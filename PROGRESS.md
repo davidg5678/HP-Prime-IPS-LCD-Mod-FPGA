@@ -3,6 +3,229 @@
 Update this file at the end of each work session so a future session (human or agent) can
 pick up cold. Newest entries at the top.
 
+## 2026-08-04 (part 2) — PHASE 4 COMPLETE: the HP Prime's screen is live on the replacement panel
+
+**Status: the passthrough works on hardware, first attempt, no debugging session. The calculator's
+display is reproduced on the Orient Display AFY320240A0 in real time, entirely inside the FPGA —
+the host is not in the video path at all.** `make pass-hw` →
+`PASS: passthrough emitting 320x240 in 371x260 at 62.2 Hz (62.7 fps wall-clock); source 320x240 at
+18.9 fps, LIVE PASSTHROUGH on the panel`. Visually confirmed: "the prime's screen is showing and
+looks perfect."
+
+**All four phases are now done.**
+
+New this session: `python/tools/passthrough.py`, `make pass-hw`, AUTO mode, report v0x07.
+`make sim SIM_TARGET=passthrough` → PASS, 43 checks. `make build BUILD_TARGET=passthrough` →
+5524 paths, 0 setup / 0 hold, Fmax 111.0 MHz. `make build-oss` agrees.
+
+### It worked first time, and the reason is worth naming
+
+Nothing was debugged on hardware. Every question that *could* have been settled in simulation had
+been, and the two that could not — is the panel wired correctly, is the calculator's flex actually
+driving — had both been settled in earlier phases by the same discipline. The bring-up was three
+commands and a look at the glass.
+
+That is the payoff `docs/verification.md` argues for, measured: the phase that had the most moving
+parts (capture + SDRAM + panel + rate matching + a runtime mux) cost the least hardware time of any
+in the project, because the RTL arrived at the bench already correct.
+
+The one thing simulation could not have caught was also the one thing that would have looked like a
+hardware fault: `BL_DUTY_INIT = 64`, which produces a **dark panel while the report says the
+backlight is on**. That was found by re-reading Phase 3's own PROGRESS entry rather than by any
+tool. Fixed before first flash. **Use `BL=255`.**
+
+### Two measurements taken at the bench, one benign and one real
+
+**Runts: 26,933 — benign, and only after doing the arithmetic.** Over ~81 s the Prime emits
+~1.08 x 10^9 DOTCLK edges, so that is **0.0025%**, roughly 15x *better* than the 130-per-frame rate
+Phase 2 measured with `frame_capture`. A raw counter means nothing without its denominator, and
+this one is alarming-looking on purpose-built display. Left as-is.
+
+**Source frame rate is 18.9 fps against the Prime's 37.7 Hz — exactly half, and this one is real.**
+Caught only because `passthrough.py` times the FPGA's own counter against host wall-clock; the
+FPGA's internal view is perfectly self-consistent at 18.9.
+
+Cause is architectural, not a coding slip. `ev_done` fires at the same instant as the *next* source
+frame's `frame_start`. At that moment **both** buffers are occupied — one just filled and awaiting
+the panel swap, one being displayed — so the writer cannot arm for the frame beginning right then,
+and re-arms one frame later. It therefore captures every *other* source frame.
+
+**This contradicts this file's own earlier claim that two buffers suffice.** That argument — "a
+completed capture is always collected before the writer needs the buffer back" — is subtly wrong:
+the writer needs a buffer *at the instant* the previous capture completes, which is necessarily
+before any panel swap can have occurred. Reader-faster-than-writer makes the *collection* safe; it
+does not make a buffer *available* at the frame boundary. Capturing every frame needs a **third
+buffer**, and the SDRAM has room to spare (8 MB total, 150 KB per buffer).
+
+Not a visible defect: the panel still refreshes at 62.2 Hz so there is no flicker, only the content
+updates at 18.9 Hz, which a calculator UI does not stress. But it is half the available fidelity,
+it was asserted to be otherwise, and simulation could never have found it — the testbench runs the
+source *faster* than the panel, the inverse regime, where this effect does not arise.
+
+### The design goal was restated, and it changed the default
+
+The passthrough is meant to be a **standalone box**: calculator in, panel out, no computer. The
+bitstream as written could not be one. `CLAUDE.md`'s mock-mode convention defaults the mux to MOCK
+at power-on, so a flashed board would sit on a test pattern forever unless a host sent `0x52`.
+
+**New third setting, `AUTO` (`0x41` = 'A'), and it is now the power-on default.** Mock pattern until
+a captured frame has been *swapped* to the reader, then live passthrough, and it stays there. Forced
+MOCK/REAL still override absolutely, so the convention's actual content — both paths in one
+runtime-switchable bitstream — is untouched. Only the default moved.
+
+AUTO also beats defaulting to plain REAL, and the reason is diagnostic rather than aesthetic:
+
+| Calculator not driving | What you see | What you can conclude |
+|---|---|---|
+| default REAL | black panel | nothing — dead bitstream, unseated FFC, backlight at 0 and "no signal" are identical |
+| **default AUTO** | **GRID pattern** | **FPGA, FFC, panel and output path are all good; only the calculator is missing** |
+
+Two implementation details that mattered more than the feature:
+
+- **It gates on `have_frame`, not `src_frames`.** `src_frames` counts frames the *writer* finished,
+  one of which may still sit unswapped in `wbuf`. Switching on that would present a buffer the panel
+  has not been handed. `have_frame` is set at `ev_swap`, so it means the *reader's* buffer is
+  complete.
+- **The effective mode is latched at the panel's frame boundary**, like the swap itself, so the
+  changeover cannot tear a frame. That also buys a free frame of margin: `ev_swap` sets `have_frame`
+  on a `tg_frame` edge, so the latch samples the pre-swap value on that edge and flips at the *next*
+  one, by which point the reader has streamed the new buffer for a whole frame.
+
+Cost: **3 registers and 2 LUTs.** The double-buffer machinery already existed; AUTO only gates it.
+
+### A regression caught by reading Phase 3's own lesson back
+
+`passthrough_top.v` shipped `BL_DUTY_INIT = 8'd64`, written the session *before* Phase 3 reached
+hardware. `lcd_panel_top.v` was corrected to `8'd0` *by* that session. So Phase 4 still carried the
+exact failure Phase 3 had already paid for: at 25% duty the LP3320 never clears soft-start, the
+panel stays dark, **and the status report says the backlight is on**. First light would have looked
+like a hardware fault.
+
+Now `8'd0`, with the reasoning in the parameter comment so it does not get "helpfully" raised again.
+The testbench reads the shipped duty back **off the wire** (`rpt[4] == 0`) rather than asserting
+about the source, and deliberately does *not* override that parameter the way it overrides
+`BL_DELAY_CYCLES`. **Use `BL=255`; intermediate values do not work on this board.**
+
+### A testbench bug that failed while the RTL was right
+
+One check failed: `effective mode still MOCK = 1, expected 0` — alongside `pixel mismatches = 0`
+over all 76,800 pixels against the GRID oracle. Both readings were true, which is what made it
+diagnosable: the frame displayed *was* mock, and the sample was taken late.
+
+Cause: a point-sample of `dut.mode_real` taken after `wait (frames == f0+1)`. `frames` counts VSYNC
+edges observed at the **pins**; `mode_real` is latched on the timing generator's **internal** frame
+tick a few cycles earlier. **This is the same pin-versus-internal skew the testbench's own comment
+already documents for `ev_swap`** — and it was reintroduced anyway, three months of notes later.
+
+Fixed by not point-sampling at all: two sticky flags accumulate which effective mode was in force
+while `lcd_de` was high, so the assertion covers every *displayed* pixel of the frame. That removes
+the skew rather than compensating for it, and it is a stronger claim — a mode that flipped mid-scan
+would now be caught too.
+
+### Fmax moved 108.423 → 111.020 MHz *because logic was added*
+
+Which cannot be a real speedup, and is the useful part. The critical path moved from
+`u_tg/hc[10] → lcd_r[0]` to `u_tg/vc[5] → lcd_g[0]`, depth 8 → 7. Both are the **mock test
+pattern's** combinational logic — diagnostic scaffolding — reaching the output register in one
+cycle.
+
+So the previous build's 36 ps of slack was **placement noise, not a structural limit**, and neither
+number is a dependable margin: this design sits around 108–111 MHz with ~3% run-to-run variation
+against a 108 MHz constraint. A future build that changes nothing could land at 108.0 and fail.
+`test_pattern`'s output is only consumed on `tg_tick`, once every 18 cycles, so **a pipeline
+register would take it off the critical path permanently** instead of leaving it to the placer.
+Not done yet — recorded so the next timing surprise is not treated as new.
+
+### `python/tools/passthrough.py` + `make pass-hw` — control and telemetry only
+
+**It carries no pixels, and it is not needed for normal use.** Phase 2's UART streaming is retired,
+not unfinished: it topped out at 2.0–2.6 fps because the ceiling was per-request latency, not bit
+rate. The video path is internal and the host is not in it.
+
+The tool exists for when AUTO *doesn't* light up, because the 24-byte report separates faults that
+look identical on the glass. Report version bumped **0x06 → 0x07**: byte 5 now carries the
+*requested* mode plus `have_frame`, while bit 2 of byte 2 carries the *effective* mode. Those two
+disagreeing is the single most useful reading in the report — "requested AUTO, effective MOCK,
+have_frame 0" means the calculator is not driving, which is a different fault from "effective REAL
+with 0 source frames".
+
+It also cross-checks the FPGA's frame counter against **host wall-clock**, the two-instruments
+argument from `docs/prime_lcd_protocol.md`: a mis-locked PLL still produces self-consistent 371×260
+frames, and only an independent clock catches that. Source-side geometry is **reported but never a
+pass criterion**, so the tool still passes on a bench with no calculator attached — which is the
+first bring-up step.
+
+### Build health
+
+- Gowin signoff: **5524 paths, 0 setup / 0 hold.** Logic 1386/20736 (7%), Register 895 (6%),
+  **42/66 package I/O**, 1 rPLL, **0 BSRAM** (the three FIFOs went to logic).
+- Setup analysed at **Slow 0.95 V 85 °C** — the worst-case corner, so the margin is real, if thin.
+- Pins 88 (`MODE0`), 87 (`MODE1`) and 9 (`RECONFIG_N`) carry no signal. The four SSPI pins
+  (53/54/55/56) *are* in use, which is exactly what `options.tcl` exists to allow.
+- Four warnings, all read. Two are the documented pair (`PR1014` on `clk_d`, `NL0002` sweeping
+  `test_pattern`). The other two are new and both correct:
+  - `CV0018 probe[1] unused` — HSYNC, which `prime_pixel.v` documents as unused.
+  - **`CV0020 probe[5:4] unused` — D0 and D1 of the Prime's bus.** RGB565 truncation drops red's
+    bottom 3 bits, green's bottom 2 and blue's bottom 3, so D0 and D1 fall below *every* threshold
+    and cannot reach any output. D2 survives only through green, which is why `probe[6]` is not in
+    the warning. **The toolchain rediscovered the board's RGB565 wiring from the RTL alone.**
+    Those two probe wires must stay physically connected regardless — `la_capture` and
+    `frame_capture` share the harness and do use all 8 bits.
+
+### Timings, for whoever optimises the loop next
+
+`make build` is **8.9 seconds**. `make sim SIM_TARGET=passthrough` is **4 m 29 s**. The simulation
+is ~34.5 M clock cycles at ~128 k cycles/s, which is ordinary `vvp` interpreter speed, and the cost
+scales with *simulated time*, not with how many pixels are checked — each panel frame is 16.08 ms
+= 1.7 M cycles ≈ 13 s of wall clock whether or not anything inspects it. Levers, in order of size:
+Verilator `--binary --timing` (10–50×, already installed, untried); trimming settling waits (~30%);
+splitting the testbench into a fast inner-loop target and a slow signoff one.
+
+### Open
+
+- **The passthrough captures every OTHER source frame (18.9 Hz, not 37.7).** Needs a third buffer;
+  see above. Highest-value remaining change, and the SDRAM has the room.
+- **The testbench runs the source FASTER than the panel — the inverse of reality.** Eight active
+  lines in a 30-line frame repeats at ~325 Hz against the panel's 62.2 Hz, where the real
+  calculator is 37.7 Hz. That exercises the frame-*dropping* path hard, which is the stricter
+  direction for the swap invariant, but it means "two buffers suffice because the reader is
+  strictly faster" is still **argued rather than demonstrated**. A second phase with
+  `P_V_TOTAL ≈ 195` (a ~20 ms source frame, slower than the panel's 16.08 ms) would enter the real
+  regime for ~60 ms of extra sim time. The PASS line previously claimed "37.7 Hz-class timing",
+  which was true of the *line* and false of the *frame*; it now states the geometry it actually ran.
+- **The writer only ever addresses `y < 8`.** Full-height addressing (`row_base` near `y = 239`) is
+  arithmetically checked — 38,240 + 159 = 38,399 against `FB_WORDS` 38,400 — but never exercised.
+- Fmax is placement-dependent at ~3% against a 108 MHz constraint; see above.
+- The RGB LED **cannot** be silenced here (pin 79 is `probe[8]`), unlike `lcd_panel`. Expect it lit
+  at some arbitrary colour; it is not a fault.
+- The LED row defaults **on**, where `lcd_panel` added `CMD_LEDS` (`0x4C`) to default it off. Not
+  ported.
+- `python/tools/lcd_panel.py`'s docstring still claims the bitstream "comes up at 25% PWM duty" —
+  stale since `BL_DUTY_INIT` went to 0 in Phase 3.
+- **Consider `make flash BUILD_TARGET=passthrough` once it works on hardware.** Every power cycle
+  currently reverts to `la_capture` in flash, which leaves pin 49 undriven and the backlight boost
+  enabled by the board's pull-up. Persisting a bitstream that actively drives that pin makes the
+  safe state the default — and makes the standalone box actually standalone.
+
+### The bring-up sequence that worked — reuse it
+
+```
+make flash-sram BUILD_TARGET=passthrough
+make pass-hw MODE=mock BL=255   # panel only: is Phase 3 intact inside the
+                                # bigger bitstream? -> 371x260 @ 62.2 Hz, and
+                                # src_frames was ALREADY climbing with
+                                # 240 lines / 320 px, so the capture side was
+                                # confirmed before the mux was ever switched.
+make pass-hw MODE=auto          # hand control back -> effective mode REAL,
+                                # reached without forcing. Prime's screen on
+                                # the glass.
+```
+
+Forcing MOCK first is what made this three commands instead of a debugging session: it separates
+"is the FPGA driving the panel correctly?" from "is the calculator driving?" **before** the two are
+composed, and the report answers the second question while the panel is still showing the first.
+That is the entire reason the capture path runs in both modes.
+
 ## 2026-08-04 — PHASE 3 COMPLETE: the panel is displaying
 
 **Status: the physical Orient Display AFY320240A0 is lit and showing all eight test patterns at
