@@ -232,8 +232,25 @@ orientation was the one that mattered** — the panel and the board's J2 are opp
 That check was flagged here as unresolvable from the schematic, and that turned out to be exactly
 right.
 
-One correction to the backlight advice above: **PWM dimming does not work on this board.** The
-LP3320's enable is driven at ~1 kHz, and at 25% duty the 250 µs on-time is shorter than its
-soft-start, so the converter never reaches regulation and the panel stays dark while the status
-report says the backlight is on. Use `BL=255` (effectively a static enable). Raising the PWM period
-so the on-time comfortably exceeds soft-start would probably restore dimming, but that is untested.
+One correction to the backlight advice above, and then a correction to the correction.
+
+**At ~1 kHz, PWM dimming does not work.** The LP3320's enable is driven at 1 kHz, and at 25% duty
+the 250 µs on-time is shorter than its soft-start, so the converter never reaches regulation and the
+panel stays dark while the status report says the backlight is on.
+
+**That was then written up as "PWM dimming does not work on this board", which over-claims from a
+single data point.** The governing relation is
+
+    minimum usable duty  ≈  converter soft-start  /  PWM period
+
+so the *frequency* is a free variable that had simply never been moved. The same 25% duty at 200 Hz
+gives a **1251 µs** on-time — five times what failed — and the LP3320's actual soft-start figure is
+not in hand. `passthrough_top` therefore makes the PWM frequency runtime-settable
+(`0x46`, `make pass-hw BLHZ=<Hz>`) and reports the resulting on-time in the status report, and
+`make pass-hw BLHZ=200 SWEEP=1` walks the duty down so the boundary can be measured rather than
+assumed. The duty at which the panel goes dark, times the period, *is* the soft-start.
+
+Pin 49 drives `EN`, not a dimming input, so PWM is the only lever the FPGA has — but "the only
+lever" is not the same as "no lever". True analog dimming would need an RC-filtered PWM injected
+into the `FB` node (the LED current sense, `R31` = 5.6 Ω), which is a hardware change and only worth
+it if the sweep shows the soft-start is too long for any flicker-free frequency.

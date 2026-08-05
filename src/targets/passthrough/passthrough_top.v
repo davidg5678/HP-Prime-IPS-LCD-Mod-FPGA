@@ -142,11 +142,15 @@
 //     0x52  'R'   force REAL  (captured frame buffer -> panel)
 //     0x50  'P'+1 select mock pattern, next byte = index
 //     0x42  'B'+1 backlight PWM duty, next byte = 0..255
+//     0x46  'F'+1 backlight PWM frequency, next byte P: prescale = (P+1)<<4,
+//                 f = 108 MHz / (prescale * 256). P=25 ~1 kHz, 131 ~200 Hz,
+//                 255 ~103 Hz. THIS IS THE DIMMING EXPERIMENT -- see the PWM
+//                 block below.
 //     0x53  'S'   status: the 24-byte report below
 //
 // REPORT (24 bytes, little-endian, prefix 'S')
 //     0      0xA5 magic
-//     1      0x07 protocol version
+//     1      0x08 protocol version
 //     2      status: bit0 pll_lock, bit1 sdram_init, bit2 EFFECTIVE mode==REAL,
 //                    bit3 backlight on, bit4 panel running,
 //                    bit5 writer overrun, bit6 reader underrun
@@ -169,6 +173,12 @@
 //     18..19 source lines in the last frame   expect 240
 //     20..21 source pixels in the last line   expect 320
 //     22..23 runt DOTCLK edges rejected
+//     24     backlight PWM prescale selector P
+//     25     reserved
+//     26..27 backlight ON-TIME per PWM cycle, microseconds. The number the
+//            dimming sweep is actually after: the duty at which the panel goes
+//            dark is a soft-start measurement, and reporting duty or frequency
+//            alone would leave the host to recompute it.
 //
 // THE SDRAM PORT NAMES ARE LOAD-BEARING; see docs/sdram.md.
 //
@@ -254,14 +264,14 @@ module passthrough_top #(
 
     localparam [7:0] CMD_RESET = 8'hAA, CMD_MOCK = 8'h4D, CMD_REAL = 8'h52,
                      CMD_PATTERN = 8'h50, CMD_BL = 8'h42, CMD_STATUS = 8'h53,
-                     CMD_AUTO = 8'h41;
+                     CMD_AUTO = 8'h41, CMD_BLHZ = 8'h46;
     // Version 7: byte 5 carries the requested mode + have_frame, which version
     // 6 did not have. The version byte is also this project's cheapest hardware
     // diagnostic -- a reply whose length and version do not match the target you
     // think you flashed means the board reset and reconfigured from flash (see
     // CLAUDE.md). Bump it whenever the report's meaning changes.
-    localparam [7:0] HDR_MAGIC = 8'hA5, HDR_VERSION = 8'h07;
-    localparam [4:0] HDR_LAST  = 5'd23;
+    localparam [7:0] HDR_MAGIC = 8'hA5, HDR_VERSION = 8'h08;
+    localparam [4:0] HDR_LAST  = 5'd27;
 
     localparam [1:0] MODE_AUTO = 2'd0, MODE_MOCK = 2'd1, MODE_REAL = 2'd2;
 
@@ -290,21 +300,29 @@ module passthrough_top #(
     reg [1:0] mode_sel;               // what the HOST asked for
     reg [2:0] pattern;
     reg [7:0] bl_duty;
-    reg       arg_wait, arg_is_bl;
+    // Declared with the other command registers, not beside the PWM block that
+    // uses it: iverilog treats use-before-declaration as a hard error where
+    // Gowin only warns (WARN EX3638). Same reason as have_frame/mode_real.
+    reg [7:0] bl_pre_sel;     // PWM frequency selector, see the backlight block
+    reg       arg_wait;
+    reg [1:0] arg_kind;   // 0 pattern, 1 backlight duty, 2 PWM prescale
 
     always @(posedge clk_s or negedge rst_n) begin
         if (!rst_n) begin
             do_reset <= 1'b0; do_status <= 1'b0;
             mode_sel <= MODE_AUTO;        // standalone by default -- see header
             pattern <= 3'd0; bl_duty <= BL_DUTY_INIT;
-            arg_wait <= 1'b0; arg_is_bl <= 1'b0;
+            arg_wait <= 1'b0; arg_kind <= 2'd0; bl_pre_sel <= 8'd25;  // ~1 kHz
         end else begin
             do_reset <= 1'b0; do_status <= 1'b0;
             if (rx_valid) begin
                 if (arg_wait) begin
                     arg_wait <= 1'b0;
-                    if (arg_is_bl) bl_duty <= rx_data;
-                    else           pattern <= rx_data[2:0];
+                    case (arg_kind)
+                        2'd1:    bl_duty    <= rx_data;
+                        2'd2:    bl_pre_sel <= rx_data;
+                        default: pattern    <= rx_data[2:0];
+                    endcase
                 end else case (rx_data)
                     // CMD_RESET returns the mux to AUTO along with everything
                     // else: a resync means "go back to the power-on state", and
@@ -315,8 +333,9 @@ module passthrough_top #(
                     CMD_AUTO:    mode_sel <= MODE_AUTO;
                     CMD_MOCK:    mode_sel <= MODE_MOCK;
                     CMD_REAL:    mode_sel <= MODE_REAL;
-                    CMD_PATTERN: begin arg_wait <= 1'b1; arg_is_bl <= 1'b0; end
-                    CMD_BL:      begin arg_wait <= 1'b1; arg_is_bl <= 1'b1; end
+                    CMD_PATTERN: begin arg_wait <= 1'b1; arg_kind <= 2'd0; end
+                    CMD_BL:      begin arg_wait <= 1'b1; arg_kind <= 2'd1; end
+                    CMD_BLHZ:    begin arg_wait <= 1'b1; arg_kind <= 2'd2; end
                     default: ;
                 endcase
             end
@@ -714,13 +733,33 @@ module passthrough_top #(
     wire [15:0] real_pix = rd_loaded ? live_pix : 16'h0000;
     wire [15:0] src_pix  = mode_real ? real_pix : mock_pix;
 
+    // The DE gate is registered for the same reason test_pattern is fenced:
+    // otherwise the path runs from the timing generator's counters, through
+    // nxt_de, through this mux, into the output register in one cycle -- and
+    // that path, not the passthrough datapath, keeps turning up as the design's
+    // critical path. Pipelining test_pattern moved the problem here rather than
+    // solving it; this finishes the job, so the counters now reach only a
+    // register and never the pins directly.
+    //
+    // Safe by the same argument, and it is worth restating because it is the
+    // whole justification: nxt_de and src_pix change only ON a tick, so they are
+    // stable for the 17 cycles between ticks. The registered copy sampled one
+    // cycle before a tick therefore equals the combinational value at the tick.
+    // Both testbenches compare all 76,800 pixels of a frame against an oracle,
+    // so a one-pixel or one-cycle error here is caught immediately.
+    reg [15:0] gated_pix;
+    always @(posedge clk_s or negedge rst_n) begin
+        if (!rst_n) gated_pix <= 16'd0;
+        else        gated_pix <= tg_nxt_de ? src_pix : 16'd0;
+    end
+
     always @(posedge clk_s or negedge rst_n) begin
         if (!rst_n) begin
             lcd_r <= 5'd0; lcd_g <= 6'd0; lcd_b <= 5'd0;
         end else if (tg_tick) begin
-            lcd_r <= tg_nxt_de ? src_pix[15:11] : 5'd0;
-            lcd_g <= tg_nxt_de ? src_pix[10:5]  : 6'd0;
-            lcd_b <= tg_nxt_de ? src_pix[4:0]   : 5'd0;
+            lcd_r <= gated_pix[15:11];
+            lcd_g <= gated_pix[10:5];
+            lcd_b <= gated_pix[4:0];
         end
     end
 
@@ -737,20 +776,82 @@ module passthrough_top #(
         end
     end
 
-    localparam [8:0] PWM_PRESCALE = 9'd422;   // 108 MHz / 422 / 256 = 999.6 Hz
-    reg [8:0] pwm_pre;
-    reg [7:0] pwm_cnt;
+    // ---- PWM, with a RUNTIME-SETTABLE FREQUENCY.
+    //
+    // The frequency is the whole experiment. Pin 49 drives the LP3320's ENABLE,
+    // not a dimming input, so the only lever the FPGA has is how it toggles that
+    // enable in time -- and whether dimming works at all is governed by one
+    // relation:
+    //
+    //     minimum usable duty  ~=  converter soft-start time / PWM period
+    //
+    // Below that, the boost never reaches regulation before being switched off
+    // again: the panel stays dark WHILE THIS DESIGN REPORTS THE BACKLIGHT ON.
+    // That state was measured once, at 1 kHz and 25% duty (250 us of on-time),
+    // and the conclusion written into three documents was "PWM dimming does not
+    // work on this board". That was over-fitting to a single data point. The
+    // same 25% duty at 200 Hz gives 1.25 ms -- five times the on-time -- and the
+    // LP3320's soft-start figure, which would settle it outright, is not in
+    // hand.
+    //
+    // So the frequency becomes a runtime parameter and the question gets
+    // answered by sweeping on real hardware rather than by rebuilding per guess:
+    //
+    //     prescale = (P + 1) << 4,  P = 0..255  ->  16 .. 4096
+    //     f = 108 MHz / (prescale * 256)        ->  26.4 kHz .. 103 Hz
+    //     P = 25   ~1 kHz   (the historical setting)
+    //     P = 131  ~200 Hz  (25% duty = 1.25 ms on-time)
+    //     P = 255  ~103 Hz  (25% duty = 2.4 ms, near the flicker floor)
+    //
+    // DELIBERATELY NOT CLAMPED. An obvious hardening is to refuse any (duty,
+    // frequency) pair whose on-time is too short. But the threshold is exactly
+    // what we are trying to measure, and a clamp that silently overrides the
+    // sweep would corrupt the experiment it is meant to protect. Instead the
+    // computed on-time is REPORTED (bytes 26..27) so the failure mode is
+    // visible rather than prevented, and python/tools/passthrough.py warns.
+    // Once the soft-start figure is known from the sweep, clamping to it
+    // becomes the right thing to do and this comment should be revisited.
+    wire [12:0] pwm_prescale = {bl_pre_sel, 4'd0} + 13'd16;
+
+    reg [12:0] pwm_pre;
+    reg [7:0]  pwm_cnt;
     always @(posedge clk_s or negedge rst_n) begin
         if (!rst_n) begin
-            pwm_pre <= 9'd0; pwm_cnt <= 8'd0;
-        end else if (pwm_pre >= PWM_PRESCALE - 9'd1) begin
-            pwm_pre <= 9'd0;
+            pwm_pre <= 13'd0; pwm_cnt <= 8'd0;
+        end else if (pwm_pre >= pwm_prescale - 13'd1) begin
+            pwm_pre <= 13'd0;
             pwm_cnt <= pwm_cnt + 8'd1;
-        end else pwm_pre <= pwm_pre + 9'd1;
+        end else pwm_pre <= pwm_pre + 13'd1;
     end
 
     wire bl_on = bl_ready && (bl_duty != 8'd0);
     assign lcd_bl = bl_on && (pwm_cnt < bl_duty);
+
+    // On-time per PWM cycle, in microseconds, for the status report. This is
+    // the number the sweep is actually looking for -- the point at which the
+    // panel stops lighting is a soft-start measurement, and reporting duty or
+    // frequency alone would leave the host to recompute it and get it wrong.
+    //   on_cycles = duty * prescale ;  us = on_cycles / 108
+    //
+    // The divide is done as a reciprocal MULTIPLY -- (cycles * 607) >> 16, since
+    // 607/65536 = 0.0092621 against 1/108 = 0.0092593, a 0.03% error and far
+    // inside the precision this number is read to. A literal `/ 108` would infer
+    // a real divider for a value that changes only when a command arrives.
+    //
+    // Two pipeline stages, both off any critical path for the same reason.
+    // Widths: duty 255 x prescale 4096 = 1,044,480 (21 bits); x 607 = 30 bits;
+    // >> 16 leaves 9682 us worst case, comfortably inside 16.
+    reg [20:0] bl_on_cycles;
+    reg [15:0] bl_on_us;
+    wire [31:0] bl_us_mul = bl_on_cycles * 21'd607;
+    always @(posedge clk_s or negedge rst_n) begin
+        if (!rst_n) begin
+            bl_on_cycles <= 21'd0; bl_on_us <= 16'd0;
+        end else begin
+            bl_on_cycles <= bl_duty * pwm_prescale;
+            bl_on_us     <= bl_us_mul[31:16];
+        end
+    end
 
     // ------------------------------------------------------------- MONITOR
     // Panel timing measured off the design's own OUTPUT PINS, not reported from
@@ -830,7 +931,11 @@ module passthrough_top #(
             5'd20: hdr_byte = src_px_line[7:0];
             5'd21: hdr_byte = src_px_line[15:8];
             5'd22: hdr_byte = runts[7:0];
-            default: hdr_byte = runts[15:8];
+            5'd23: hdr_byte = runts[15:8];
+            5'd24: hdr_byte = bl_pre_sel;
+            5'd25: hdr_byte = 8'h00;
+            5'd26: hdr_byte = bl_on_us[7:0];
+            default: hdr_byte = bl_on_us[15:8];
         endcase
     end
 

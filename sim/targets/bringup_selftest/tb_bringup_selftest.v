@@ -17,8 +17,22 @@
 module tb_bringup_selftest;
     localparam integer CLK_HZ  = 27_000_000;
     localparam integer BAUD    = 1_000_000; // must match bringup_selftest_top.v
-    localparam integer HALF_PS = 500_000_000_000 / CLK_HZ; // 18518 ps
-    localparam integer BIT_PS  = 1_000_000_000_000 / BAUD; // 8680555 ps
+    // The 64'd prefixes are LOAD-BEARING. An unsized Verilog integer literal is
+    // 32 bits, and both numerators exceed 2^32 (5e11 and 1e12), so without them
+    // the constant folding overflows and these evaluate to garbage. Icarus
+    // happens to fold at wider precision and got the right answer anyway,
+    // whereas a standard-conforming tool produces a bit time that hangs the
+    // bit-banged UART -- surfacing only as a watchdog timeout. (Note: a comment
+    // line must not BEGIN with the word verilator, or it is parsed as a pragma
+    // and the build fails with BADVLTPRAGMA. Learned the direct way.)
+    //
+    // docs/verification.md warns about exactly this ("a 22 ms timeout expressed
+    // in ps overflows it silently") -- and this file then did it two lines from
+    // the watchdog the warning is about. The trailing comment on BIT_PS also
+    // said 8680555 ps, which is the 115200-baud figure from before this link
+    // moved to 1 Mbaud; at 1 Mbaud a bit is 1 us.
+    localparam integer HALF_PS = 64'd500_000_000_000 / CLK_HZ;   // 18518 ps
+    localparam integer BIT_PS  = 64'd1_000_000_000_000 / BAUD;   // 1_000_000 ps
     localparam [7:0]   SEED    = 8'h01;
     localparam [7:0]   CMD_RESYNC     = 8'hAA;
     localparam [7:0]   CMD_FORCE_REAL = 8'h52; // 'R'

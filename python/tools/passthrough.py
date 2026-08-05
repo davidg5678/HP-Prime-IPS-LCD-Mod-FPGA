@@ -12,7 +12,7 @@ PROGRESS.md 2026-08-03 part 3). The internal path is 108 MHz x 32 bits =
 432 MB/s, about 4000x the serial link. So streaming was abandoned deliberately,
 not left unfinished, and this tool does not do it.
 
-What it does is send single command bytes and read a 24-byte status report --
+What it does is send single command bytes and read a 28-byte status report --
 a few bytes per second, on demand. Control and telemetry only.
 
 YOU DO NOT NEED THIS TOOL TO USE THE PASSTHROUGH
@@ -33,13 +33,34 @@ faults that all look identical on the glass:
       image                            also wrong. That separates panel faults
                                        from capture faults in one command.
 
-THE BACKLIGHT IS OFF AT POWER-ON, DELIBERATELY. Use --backlight 255.
-Intermediate values DO NOT WORK on this board: the pin drives the LP3320's
-ENABLE, and at ~1 kHz PWM a 25% duty gives a 250 us on-time that never clears
-the converter's soft-start -- the panel stays dark while the report says the
-backlight is on. Measured from both directions in PROGRESS.md 2026-08-04.
-The panel wants 19.2 V at 40 mA, absolute max 50 mA; measure before leaving it
-on continuously.
+BACKLIGHT AND DIMMING
+---------------------
+The shipped default is duty 255 -- a static enable -- so a flashed board lights
+itself. Pin 49 drives the LP3320's ENABLE, not a dimming input, so the only
+lever is how that enable is toggled in time, and ONE relation governs whether
+dimming is possible at all:
+
+    minimum usable duty  ~=  converter soft-start / PWM period
+
+Below it the boost never reaches regulation and the panel stays dark WHILE THIS
+REPORT SAYS THE BACKLIGHT IS ON. That was measured once, at 1 kHz and 25% duty
+= 250 us of on-time, and written up as "PWM dimming does not work on this
+board". That was over-fitting to a single point: the same 25% duty at 200 Hz
+gives 1252 us, five times the on-time, and the LP3320's actual soft-start
+figure is not in hand.
+
+So the frequency is now runtime-settable and the question is settled by
+measurement:
+
+    make pass-hw BLHZ=200 SWEEP=1     # walk the duty down, watch the panel
+
+The duty at which it goes dark, times the period, IS the soft-start. Feed that
+back into a sensible minimum. Expect brightness to be non-linear near the
+bottom, since current ramps during soft-start.
+
+The panel wants 19.2 V at 40 mA, absolute max 50 mA. MEASURE THE CURRENT before
+leaving it running continuously; the datasheet is explicit that over-driving
+shortens LED life, and it is still unmeasured on this board.
 
 FIRST LIGHT, in order -- one variable at a time, per docs/verification.md:
 
@@ -69,8 +90,26 @@ BAUD = 1_000_000
 
 CMD_RESET, CMD_AUTO, CMD_MOCK = 0xAA, 0x41, 0x4D
 CMD_REAL, CMD_PATTERN, CMD_BL, CMD_STATUS = 0x52, 0x50, 0x42, 0x53
+CMD_BLHZ = 0x46
 
-HDR_MAGIC, HDR_VERSION, HDR_LEN = 0xA5, 0x07, 24
+HDR_MAGIC, HDR_VERSION, HDR_LEN = 0xA5, 0x08, 28
+
+CLK_HZ = 108_000_000
+
+
+def prescale_of(p):
+    """RTL: prescale = (P + 1) << 4."""
+    return (p + 1) << 4
+
+
+def pwm_hz(p):
+    return CLK_HZ / (prescale_of(p) * 256)
+
+
+def p_for_hz(hz):
+    """Nearest selector for a requested frequency, clamped to the legal range."""
+    p = round(CLK_HZ / (hz * 256) / 16) - 1
+    return max(0, min(255, int(p)))
 
 MODE_AUTO, MODE_MOCK, MODE_REAL = 0, 1, 2
 MODE_NAMES = {MODE_AUTO: "AUTO", MODE_MOCK: "MOCK", MODE_REAL: "REAL"}
@@ -89,7 +128,7 @@ PATTERNS = ["GRID", "BARS", "RAMPS", "PLAID", "WHITE", "BLACK", "THIRDS",
 
 
 class Report:
-    """The 24-byte status report, decoded. Field names match the RTL's comment
+    """The 28-byte status report, decoded. Field names match the RTL's comment
     block in src/targets/passthrough/passthrough_top.v."""
 
     def __init__(self, raw: bytes):
@@ -121,6 +160,12 @@ class Report:
         self.src_lines = u16(18)
         self.src_px_line = u16(20)
         self.runts = u16(22)
+        self.bl_p = raw[24]
+        self.bl_on_us = u16(26)
+
+    @property
+    def bl_hz(self):
+        return pwm_hz(self.bl_p)
 
     @property
     def line_us(self):
@@ -162,6 +207,19 @@ def describe(r: Report) -> None:
     print(f"  mock pattern        {r.pattern} "
           f"({PATTERNS[r.pattern] if r.pattern < len(PATTERNS) else '?'})")
     print(f"  backlight           duty {r.bl_duty}, on={r.backlight_on}")
+    print(f"  backlight PWM       P={r.bl_p} -> {r.bl_hz:.0f} Hz, "
+          f"on-time {r.bl_on_us} us/cycle")
+    # The on-time is the figure that decides whether dimming can work at all:
+    # below the LP3320's soft-start the converter never reaches regulation and
+    # the panel stays dark WHILE THIS REPORT SAYS THE BACKLIGHT IS ON. 1 kHz at
+    # 25% duty -- 250 us -- was measured doing exactly that. The threshold is
+    # not known, which is what the sweep is for, so this warns rather than
+    # asserting: an unknown boundary must not become a hard-coded one.
+    if r.bl_duty not in (0, 255) and r.bl_on_us < 1000:
+        print(f"  ^^ WARNING: {r.bl_on_us} us on-time is in the region where the")
+        print(f"     LP3320 was measured never to reach regulation (250 us failed).")
+        print(f"     If the panel is dark while this says on, lower the PWM")
+        print(f"     frequency: --bl-hz 200 gives ~5x the on-time at the same duty.")
     print()
     print("  --- panel, measured by the FPGA off its own output pins ---")
     print(f"  DCLKs per line      {r.h_total} (expect {EXP_H_TOTAL})")
@@ -196,6 +254,15 @@ def main():
                     help="backlight duty. USE 255 -- intermediate values do not "
                          "work on this board (LP3320 soft-start). Measure the "
                          "LED current before leaving it on.")
+    ap.add_argument("--bl-hz", type=float, metavar="HZ",
+                    help="backlight PWM frequency, 103..26400 Hz. THE DIMMING "
+                         "EXPERIMENT: dimming needs the on-time to exceed the "
+                         "LP3320's soft-start, and on-time = duty x period. "
+                         "1 kHz (the old fixed value) cannot dim; try 200.")
+    ap.add_argument("--bl-sweep", action="store_true",
+                    help="walk the duty down at the current frequency, pausing "
+                         "at each step so you can say where the panel goes dark. "
+                         "That point IS the soft-start measurement.")
     ap.add_argument("--reset", action="store_true",
                     help="send CMD_RESET: restart capture, buffers and the "
                          "panel timing generator, and return the mux to AUTO")
@@ -227,10 +294,42 @@ def main():
             port.write(bytes([CMD_PATTERN, args.pattern]))
             port.flush()
             time.sleep(0.05)
+        if args.bl_hz is not None:
+            p = p_for_hz(args.bl_hz)
+            port.write(bytes([CMD_BLHZ, p]))
+            port.flush()
+            time.sleep(0.05)
+            print(f"PWM frequency: requested {args.bl_hz:.0f} Hz -> "
+                  f"P={p} -> {pwm_hz(p):.1f} Hz actual")
         if args.backlight is not None:
             port.write(bytes([CMD_BL, args.backlight]))
             port.flush()
             time.sleep(0.05)
+
+        if args.bl_sweep:
+            # Guided rather than automatic, because the measurement instrument
+            # is your eyes -- nothing on the 40-pin connector reports back, so
+            # the FPGA cannot tell a lit panel from a dark one. The tool's job
+            # is to make each step unambiguous and print the arithmetic.
+            r0 = read_report(port)
+            print()
+            print(f"Backlight sweep at P={r0.bl_p} ({r0.bl_hz:.0f} Hz).")
+            print("Watch the panel. Note the duty at which it goes dark or")
+            print("starts flickering -- that duty x period IS the soft-start.")
+            print()
+            print(f"  {'duty':>5} {'%':>5} {'on-time':>9}")
+            for duty in (255, 224, 192, 160, 128, 96, 64, 48, 32, 24, 16, 8):
+                port.write(bytes([CMD_BL, duty]))
+                port.flush()
+                time.sleep(0.35)
+                rs = read_report(port)
+                print(f"  {duty:>5} {100*duty/255:>4.0f}% {rs.bl_on_us:>7} us")
+                time.sleep(1.2)
+            port.write(bytes([CMD_BL, 255]))
+            port.flush()
+            print()
+            print("Restored to 255. Re-run with --bl-hz lower to extend the range.")
+            return 0
 
         # Let the mux settle: it is latched at the panel's frame boundary, so a
         # command needs up to two 16 ms frames to be visible in the report.

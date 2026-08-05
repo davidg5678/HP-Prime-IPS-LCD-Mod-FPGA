@@ -7,8 +7,10 @@ BL           ?=
 LEDS         ?=
 MODE         ?=
 WATCH        ?=
+BLHZ         ?=
+SWEEP        ?=
 
-.PHONY: sim simq build build-oss flash flash-sram selftest-hw capture-hw sdram-hw frame-hw stream-hw lcd-hw pass-hw check-env clean
+.PHONY: sim simq simq-all build build-oss flash flash-sram selftest-hw capture-hw sdram-hw frame-hw stream-hw lcd-hw pass-hw check-env clean
 
 sim:          ; tools/sim/run_sim.sh $(SIM_TARGET)
 # Same testbench, same PASS/FAIL contract, Verilator instead of Icarus.
@@ -18,6 +20,11 @@ sim:          ; tools/sim/run_sim.sh $(SIM_TARGET)
 # Verilog is, which is exactly what makes their agreement worth something. See
 # the header of tools/sim/run_sim_fast.sh.
 simq:         ; tools/sim/run_sim_fast.sh $(SIM_TARGET)
+# Full regression across EVERY sim target, under Verilator. Newly practical:
+# the same sweep under Icarus was ~30 min, which is long enough that nobody runs
+# it. src/common/ is shared by seven targets, so a change to one phase reaches
+# the others -- this is the gate that catches that.
+simq-all:     ; tools/sim/run_all_fast.sh
 build:        ; tools/build/gowin_build.sh $(BUILD_TARGET)
 build-oss:    ; tools/build/oss_cad_build.sh $(BUILD_TARGET)
 flash-sram:   ; tools/build/flash.sh $(BUILD_TARGET)
@@ -60,9 +67,15 @@ lcd-hw:       ; python3 python/tools/lcd_panel.py $(if $(PORT),--port $(PORT)) $
 # retired and is not coming back.
 #   MODE=auto|mock|real  force the pixel source (auto = the power-on behaviour)
 #   PATTERN=0..7         mock image, as lcd-hw
-#   BL=0..255            backlight. USE 255 -- intermediate values do not work
-#                        on this board (LP3320 soft-start); see PROGRESS.md.
+#   BL=0..255            backlight duty. 255 = static enable = the shipped
+#                        default. Intermediate values need BLHZ lowered too.
 #   WATCH=<seconds>      poll for this long instead of the default 0.5 s
-pass-hw:      ; python3 python/tools/passthrough.py $(if $(PORT),--port $(PORT)) $(if $(MODE),--mode $(MODE)) $(if $(PATTERN),--pattern $(PATTERN)) $(if $(BL),--backlight $(BL)) $(if $(WATCH),--watch $(WATCH))
+#   BLHZ=<Hz>            backlight PWM frequency, 103..26400. THE DIMMING
+#                        EXPERIMENT: on-time = duty x period must exceed the
+#                        LP3320's soft-start or the panel stays dark while
+#                        reporting itself lit. 1 kHz cannot dim; try 200.
+#   SWEEP=1              walk the duty down at BLHZ, pausing at each step. The
+#                        duty where the panel goes dark IS the soft-start.
+pass-hw:      ; python3 python/tools/passthrough.py $(if $(PORT),--port $(PORT)) $(if $(MODE),--mode $(MODE)) $(if $(PATTERN),--pattern $(PATTERN)) $(if $(BL),--backlight $(BL)) $(if $(BLHZ),--bl-hz $(BLHZ)) $(if $(SWEEP),--bl-sweep) $(if $(WATCH),--watch $(WATCH))
 check-env:    ; tools/setup/check_env.sh
 clean:        ; rm -rf impl build_oss sim/.build

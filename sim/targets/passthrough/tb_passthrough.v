@@ -51,7 +51,7 @@ module tb_passthrough;
 
     localparam [7:0] CMD_RESET = 8'hAA, CMD_MOCK = 8'h4D, CMD_REAL = 8'h52,
                      CMD_PATTERN = 8'h50, CMD_BL = 8'h42, CMD_STATUS = 8'h53,
-                     CMD_AUTO = 8'h41;
+                     CMD_AUTO = 8'h41, CMD_BLHZ = 8'h46;
     localparam integer MODE_AUTO = 0, MODE_MOCK = 1, MODE_REAL = 2;
 
     reg clk = 1'b0;
@@ -284,7 +284,7 @@ module tb_passthrough;
         end
     endtask
 
-    reg [7:0] rpt [0:23];
+    reg [7:0] rpt [0:27];
     // The receiver is forked BEFORE the request goes out: the FPGA replies
     // within a few 108 MHz cycles, so a sequential send-then-listen misses the
     // first start bit. See the same note in sim/targets/lcd_panel.
@@ -295,7 +295,7 @@ module tb_passthrough;
             fork
                 uart_send(CMD_STATUS);
                 begin
-                    for (i = 0; i < 24; i = i + 1) begin
+                    for (i = 0; i < 28; i = i + 1) begin
                         uart_recv(b);
                         rpt[i] = b;
                     end
@@ -391,7 +391,7 @@ module tb_passthrough;
         $display("--- status report ---");
         read_report;
         chk_i("magic",            rpt[0], 8'hA5);
-        chk_i("version",          rpt[1], 8'h07);
+        chk_i("version",          rpt[1], 8'h08);
         chk_i("pll_lock bit",     rpt[2]       & 1, 1);
         chk_i("sdram_init bit",  (rpt[2] >> 1) & 1, 1);
         chk_i("effective mode==REAL bit", (rpt[2] >> 2) & 1, 1);
@@ -424,6 +424,40 @@ module tb_passthrough;
             errors = errors + 1;
         end else $display("  ok  backlight duty is not an unreachable PWM value");
         chk_i("backlight-on bit",      (rpt[2] >> 3) & 1, 1);
+
+        // ---- PWM frequency control, and the on-time it produces.
+        //
+        // These numbers are the dimming experiment stated as arithmetic. The
+        // shipped default is P=25 -> prescale 416 -> 1014 Hz, and at full duty
+        // that is a 982 us on-time. The historically FAILING configuration was
+        // 1 kHz at 25% duty, i.e. 250 us -- and the claim worth testing is that
+        // the same duty at ~200 Hz gives five times that. Asserting the exact
+        // figures here means the host tool and the RTL cannot drift apart about
+        // what a given (duty, frequency) pair actually delivers, which is the
+        // only thing that makes a hardware sweep interpretable.
+        chk_i("shipped PWM selector P", rpt[24], 25);
+        chk_i("shipped on-time us",     rpt16(26), 982);
+
+        uart_send(CMD_BLHZ);  uart_send(8'd131);   // prescale 2112 -> 199.7 Hz
+        uart_send(CMD_BL);    uart_send(8'd64);    // 25% duty
+        repeat (20) @(posedge lcd_ck);
+        read_report;
+        chk_i("PWM selector after CMD_BLHZ", rpt[24], 131);
+        chk_i("duty after CMD_BL",           rpt[4],  64);
+        // 64 * 2112 = 135,168 cycles / 108 MHz = 1251.6 us, truncated to 1251.
+        // (The reciprocal multiply gives 1251.9 and truncates to the same
+        // value; the expected figure here was first written as 1252 by rounding
+        // by hand, and the testbench was right to reject it.)
+        //
+        // Against the 250 us that FAILED on hardware at 1 kHz: five times the
+        // on-time from the very same 25% duty. That ratio is the entire reason
+        // the PWM frequency became a runtime parameter.
+        chk_i("on-time us at 200 Hz / 25%",  rpt16(26), 1251);
+
+        // Put it back so the later checks see the shipped configuration.
+        uart_send(CMD_BLHZ);  uart_send(8'd25);
+        uart_send(CMD_BL);    uart_send(8'd255);
+        repeat (20) @(posedge lcd_ck);
         chk_i("reported DCLKs per line",  rpt16(6),  EXP_H_TOTAL);
         chk_i("reported active DCLKs",    rpt16(8),  EXP_H_ACTIVE);
         chk_i("reported lines per frame", rpt16(10), EXP_V_TOTAL);
