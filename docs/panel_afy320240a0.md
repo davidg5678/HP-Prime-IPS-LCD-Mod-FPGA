@@ -232,25 +232,44 @@ orientation was the one that mattered** — the panel and the board's J2 are opp
 That check was flagged here as unresolvable from the schematic, and that turned out to be exactly
 right.
 
-One correction to the backlight advice above, and then a correction to the correction.
+### Backlight dimming — it works. Two earlier claims here were wrong.
 
-**At ~1 kHz, PWM dimming does not work.** The LP3320's enable is driven at 1 kHz, and at 25% duty
-the 250 µs on-time is shorter than its soft-start, so the converter never reaches regulation and the
-panel stays dark while the status report says the backlight is on.
+**Measured 2026-08-07: at 200 Hz the backlight dims smoothly from duty 255 down to 8, and looks good
+at every level.** No flicker observed. At the bottom of the range the panel is dim but still lit.
 
-**That was then written up as "PWM dimming does not work on this board", which over-claims from a
-single data point.** The governing relation is
+This section previously said, in order:
 
-    minimum usable duty  ≈  converter soft-start  /  PWM period
+1. *"The bitstream comes up at 25% PWM duty"* — then that dimming failed, so
+2. *"PWM dimming does not work on this board. Use `BL=255`."*
 
-so the *frequency* is a free variable that had simply never been moved. The same 25% duty at 200 Hz
-gives a **1251 µs** on-time — five times what failed — and the LP3320's actual soft-start figure is
-not in hand. `passthrough_top` therefore makes the PWM frequency runtime-settable
-(`0x46`, `make pass-hw BLHZ=<Hz>`) and reports the resulting on-time in the status report, and
-`make pass-hw BLHZ=200 SWEEP=1` walks the duty down so the boundary can be measured rather than
-assumed. The duty at which the panel goes dark, times the period, *is* the soft-start.
+**Both were over-claims from single observations, and (2) was the expensive one**: it turned the
+backlight into a binary and shipped a default that powered the box up dark. Pin 49 drives the
+LP3320's `EN` rather than a dimming input, so PWM is the only lever the FPGA has — but the *PWM
+frequency* was a free variable nobody had moved. It is now runtime-settable:
 
-Pin 49 drives `EN`, not a dimming input, so PWM is the only lever the FPGA has — but "the only
-lever" is not the same as "no lever". True analog dimming would need an RC-filtered PWM injected
-into the `FB` node (the LED current sense, `R31` = 5.6 Ω), which is a hardware change and only worth
-it if the sweep shows the soft-start is too long for any flicker-free frequency.
+```
+make pass-hw BLHZ=200 BL=64        # frequency, then duty
+make pass-hw BLHZ=200 SWEEP=1      # walk the duty down and watch the panel
+```
+
+The status report carries the resulting **on-time in microseconds**, which is the figure that
+matters if the converter ever does drop out of regulation.
+
+**An unresolved contradiction, stated rather than papered over.** The reasoning that motivated the
+frequency control was "on-time must exceed the converter's soft-start". The data refutes it:
+
+| | on-time | result |
+|---|---|---|
+| 1 kHz, 25% duty (2026-08-04) | 250 µs | recorded dark |
+| 200 Hz, duty 8 (2026-08-07) | **156 µs** | **lit** |
+
+The working case has the *shorter* on-time. So either another variable distinguishes them — off-time,
+the converter's inter-cycle shutdown behaviour, C54 discharging through a non-linear LED string — or
+the original observation was wrong. A 1 kHz re-sweep settles it in thirty seconds and has not been
+run. Until it is, no mechanism should be written here; the last mechanism written here was inferred
+from one data point and did not survive contact with a second.
+
+**Still unmeasured: the LED current**, at any duty. The panel wants 19.2 V at 40 mA, absolute
+maximum 50 mA, and the board's driver was designed for a different panel. Dimming makes
+over-driving less likely; it does not measure it.
+

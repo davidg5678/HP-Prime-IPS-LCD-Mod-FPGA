@@ -3,6 +3,73 @@
 Update this file at the end of each work session so a future session (human or agent) can
 pick up cold. Newest entries at the top.
 
+## 2026-08-07 — BACKLIGHT DIMMING WORKS. The "PWM dimming is impossible" claim was wrong.
+
+**Status: observed on hardware — at 200 Hz the backlight dims smoothly across the entire sweep,
+duty 255 down to 8, and looks good at every level.** User's words: *"Dimming works and looks good at
+all levels, but panel never goes completely dark; it just gets pretty dim."* No flicker reported.
+
+```
+make pass-hw BLHZ=200 SWEEP=1
+
+ duty     %   on-time          observed
+  255  100%    4988 us         bright
+  128   50%    2503 us         |
+   64   25%    1251 us         |  smooth, good at every step
+   32   13%     625 us         |
+    8    3%     156 us         dim, still lit
+```
+
+### What this overturns
+
+Three documents carried "**PWM dimming does not work on this board**", derived from a single
+measurement: 1 kHz, 25% duty, dark. That is now definitively false as a statement about the board.
+The frequency was never the fixed thing — it was just never varied.
+
+The cost of the original phrasing was real: it made `BL_DUTY_INIT` a binary choice between 0 and
+255 for two sessions, and produced a shipped default that powered the box up dark.
+
+### And it leaves a contradiction, recorded rather than explained away
+
+The model that justified the fix was *minimum usable duty ≈ soft-start / period* — lengthen the
+period and the on-time clears soft-start. **The data does not support that model.**
+
+```
+FAILED (2026-08-04):   1 kHz, 25% duty  ->  250 us on-time  ->  dark
+WORKS  (2026-08-07):   200 Hz, duty 8   ->  156 us on-time  ->  lit
+```
+
+**The working case has a SHORTER on-time than the failing one.** So on-time versus soft-start cannot
+be what distinguishes them. Either some other variable does — off-time, the converter's shutdown
+behaviour between cycles, C54's discharge through a non-linear LED string — or the original
+observation was mistaken. That session was the same one that fixed the reversing FFC and had a
+misread meter, so a bad reading is not implausible.
+
+**The re-test at 1 kHz was attempted and did not run** (`make pass-hw BLHZ=1000 SWEEP=1` — the board
+had been disconnected). It is a 30-second experiment and it is the single thing that would settle
+this. Do it before writing any explanation into the docs; the whole point of this entry is that the
+last explanation was written from one data point and was wrong.
+
+### Open, in priority order
+
+- **Re-run the 1 kHz sweep.** Resolves the contradiction above. If 1 kHz now dims fine, the original
+  observation was simply wrong and the frequency control is a convenience rather than a fix. If it
+  is genuinely dark, there is a real frequency threshold worth finding by bisection.
+- **`BL=0` full-off is not observed.** The sweep stops at duty 8. The RTL forces the pin low when
+  `bl_duty == 0` (`bl_on = bl_ready && (bl_duty != 8'd0)`), so it should be a true off, but "should
+  be" is what this entry is about. One command confirms it.
+- **The low end is coarse and perceptually uneven.** Duty is 8-bit, so the bottom of the range steps
+  8 -> 4 -> 2 -> 1 in ~doubling jumps of *perceived* brightness, since perception is roughly
+  logarithmic. Two independent improvements: widen the PWM duty to 12 bits for resolution near
+  zero, and apply a gamma curve (host-side is enough — map a 0..255 user level through
+  `(level/255)^2.2`) so equal control steps feel equal. This is what would turn "good at all levels"
+  into even control.
+- **LED current is STILL unmeasured**, now at every duty. The panel wants 19.2 V at 40 mA, abs max
+  50 mA. Dimming makes the design safer, not verified.
+- Analog dimming via an RC-filtered PWM into the `FB` node stays available as a hardware option, but
+  on this evidence **it is not needed** — which was the question worth answering before designing a
+  PCB around it.
+
 ## 2026-08-04 (part 3) — full frame rate, a 19x faster sim loop, and an FPGA playbook
 
 **Status: the standalone box is finished. Flashed, boots into the live passthrough by itself with

@@ -41,7 +41,8 @@ editing.
 |---|---|
 | Environment self-check | `make check-env` |
 | Simulate — fast inner loop (Verilator) | `make simq SIM_TARGET=<name>` — **19x faster**, same PASS/FAIL contract |
-| Simulate — reference/signoff (Icarus) | `make sim` or `make sim SIM_TARGET=<name>` |
+| Simulate — **full regression, all 12 targets** | `make simq-all` — **57 s**; run this before committing |
+| Simulate — second opinion (Icarus) | `make sim SIM_TARGET=<name>` — ~4 min, on demand |
 | Phase 1 capture over USB serial | `make capture-hw` (add `VCD=captures/x.vcd`) |
 | Headless synth+PnR+bitstream (Gowin, primary) | `make build` or `make build BUILD_TARGET=<name>` |
 | Open-source lint/build sanity check | `make build-oss` |
@@ -49,7 +50,14 @@ editing.
 | Flash to on-board flash (persistent) | `make flash` |
 | Hardware self-test over USB serial | `make selftest-hw` |
 | Phase 3 panel timing check + pattern select | `make lcd-hw` (add `PATTERN=0..7`, `BL=0..255`, `LEDS=on\|off`) |
-| Phase 4 passthrough control + telemetry | `make pass-hw` (add `MODE=auto\|mock\|real`, `PATTERN=0..7`, `BL=0..255`, `WATCH=<s>`) |
+| Phase 4 passthrough control + telemetry | `make pass-hw` (add `MODE=auto\|mock\|real`, `PATTERN=0..7`, `BL=0..255`, `BLHZ=<Hz>`, `SWEEP=1`, `WATCH=<s>`) |
+
+**`make simq-all` is the everyday gate, not `make sim`.** Neither simulator is "the authority" —
+they check each other, and each has caught something the other missed. Verilator found a 32-bit
+literal overflow in `tb_bringup_selftest` that Icarus had hidden for the life of the project by
+folding constants at wider precision. `src/common/` is shared by seven targets, so a change to one
+phase reaches the others; full regression is 57 s and is what catches that. Run `make sim` on a
+single target when something is genuinely strange.
 
 **Host-side frame streaming over the UART is retired, not unfinished.** It topped out at 2.0–2.6 fps
 because the ceiling was per-request latency, not bit rate — raising the baud rate made it *worse*.
@@ -188,7 +196,17 @@ for normal use**; it carries no pixels.
   not win against that, so **every bitstream that does not actively drive pin 49 leaves the boost
   converter enabled** — including `la_capture`, `frame_capture` and an unconfigured FPGA. Its
   feedback comes from a sense resistor in series with the *panel's* LED string, so with no panel
-  mated it drives an open circuit at maximum. `lcd_panel` therefore ships `BL_DUTY_INIT = 0`.
+  mated it drives an open circuit at maximum. `lcd_panel` therefore ships `BL_DUTY_INIT = 0`;
+  `passthrough` ships **255**, because it is a flashed standalone box with a panel permanently
+  mated, and a default of 0 means it powers up dark and needs a computer to light it.
+- **Backlight DIMMING WORKS — at 200 Hz, not at 1 kHz.** Measured 2026-08-07: smooth and good at
+  every level from duty 255 down to 8 (`make pass-hw BLHZ=200 SWEEP=1`). Earlier notes in this repo
+  said "PWM dimming does not work on this board"; that was extrapolated from one measurement at
+  1 kHz and is **wrong**. The PWM frequency is runtime-settable (`0x46`, `BLHZ=<Hz>`, 103 Hz–26 kHz)
+  and the status report carries the on-time in µs. Note an unresolved contradiction: the failing
+  1 kHz case had a *longer* on-time (250 µs) than the working 200 Hz one (156 µs), so
+  "on-time vs soft-start" does not explain it — see `docs/panel_afy320240a0.md`. A 1 kHz re-sweep
+  would settle it and has not been run.
 - **The onboard WS2812 latches its colour; an unassigned pin 79 leaves it lit.** Tying it low does
   not clear it (a permanently low line is just an inter-frame gap) — the only fix is to send 24
   zero bits, which `src/common/ws2812_off.v` does. Pin 79 is also `probe[8]`, so capturing targets

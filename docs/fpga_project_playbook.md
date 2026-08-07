@@ -129,9 +129,16 @@ Specifics that took a while to learn:
 Use **Verilator (`--binary --timing`) for the inner loop** and **Icarus for signoff**. Keep both.
 
 ```bash
-make simq SIM_TARGET=<name>    # Verilator   ~15 s
-make sim  SIM_TARGET=<name>    # Icarus      ~4 min, unchanged meaning
+make simq SIM_TARGET=<name>    # Verilator, one target   ~15 s
+make simq-all                  # Verilator, ALL targets  ~57 s   <- the gate
+make sim  SIM_TARGET=<name>    # Icarus, one target      ~4 min  <- on demand
 ```
+
+**Full regression is the point, not single-target speed.** Under the slow simulator a sweep of all
+targets ran ~30 minutes — long enough that nobody runs it, so in practice the suite was only ever
+exercised one target at a time, and only the target somebody was already thinking about. At 19× it
+becomes a thing you type before every commit. That matters because a shared `common/` directory
+means a change to one phase reaches the others, which a single-target run cannot see.
 
 Verilator 5 runs ordinary Verilog testbenches — `#delay`, `fork`/`join`, `wait()`, hierarchical
 `dut.internal_signal` references, tristate `inout` buses, `$fatal` — compiled to C++ instead of
@@ -145,6 +152,21 @@ Why keep two:
 > Icarus. A reg driven from two `always` blocks is a *hard error* in that same synthesiser and
 > simulates happily in Icarus. Agreement between independent implementations is evidence; a single
 > tool passing is not.
+
+Do not decide in advance which one is "the authority." The fast simulator was introduced here as a
+convenience with the slow one kept as reference — and then the fast one immediately found a bug the
+reference had hidden for the life of the project:
+
+```verilog
+localparam integer BIT_PS = 1_000_000_000_000 / BAUD;   // 1e12 > 2^32
+```
+
+An unsized Verilog integer literal is 32 bits, so this overflows during constant folding. One
+simulator folds at wider precision and gets the right answer; the other follows the standard and
+produces a garbage bit time that hangs a bit-banged UART. **The standard-conforming one was right.**
+Note also that the project's own verification doc warned about this exact hazard — in a paragraph
+about watchdog timeouts, while the bug sat two lines above the watchdog. **A documented trap is not
+a defended one**; only an executable check is.
 
 That is the same argument for keeping an open-source build path (yosys/nextpnr) alongside the
 vendor one as a second opinion.
@@ -390,10 +412,22 @@ Generalised from ones that cost real time:
 - **Some peripherals latch and hold.** An addressable RGB LED keeps its colour indefinitely; tying
   its data line low does not clear it, because a permanently low line is just an endless inter-frame
   gap. The only fix is to *send* the zero frame.
-- **PWM is not dimming when the pin is an enable.** Driving an enable pin at 1 kHz / 25% duty gave a
-  250 µs on-time shorter than the regulator's soft-start, so it never reached regulation. Result:
-  dark output **while the status report said it was on** — a fault presenting as working telemetry,
-  which is the worst combination there is.
+- **PWM on an enable pin is a frequency question, not a yes/no question.** Driving a backlight
+  regulator's enable at 1 kHz / 25% duty produced dark output **while the status report said it was
+  on** — a fault presenting as working telemetry, the worst combination there is. The conclusion
+  written up was "PWM dimming does not work on this board." At 200 Hz it works across the whole
+  range and looks good at every level.
+
+  The lesson is not about backlights. **One failing configuration was generalised into a property of
+  the hardware**, and that claim then propagated into three documents and shaped a shipped default
+  for two sessions. When something fails, ask which variable you actually varied — here the duty was
+  swept and the frequency never was. Make the untested variable controllable at runtime and sweep it
+  before concluding anything.
+
+  A postscript worth keeping, because it is the honest state of that investigation: the model that
+  motivated the fix ("on-time must exceed soft-start") is itself contradicted by the data — the
+  working case has a *shorter* on-time than the failing one. The fix works; the explanation for why
+  is still unknown, and saying so beats inventing a mechanism that sounds right.
 - **When a datasheet section returns nothing from `pdftotext`, the tables are images.** That reads
   exactly like "there is no timing table" rather than like a failed extraction. Read those pages
   visually. Two required pulse-width figures were missing from an analysis for this reason alone,
