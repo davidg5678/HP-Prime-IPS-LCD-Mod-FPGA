@@ -22,3 +22,6 @@ captures/*
 # macOS / editor
 .DS_Store
 .vscode/
+
+# Local Claude Code session config (machine-specific permission grants)
+.claude/settings.local.json
