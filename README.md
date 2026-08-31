@@ -1,5 +1,11 @@
 # HP Prime LCD → IPS panel, on an FPGA
 
+Disclaimer: If you'd like to learn more about this project in a form that wasn't written by AI, please take a look at my website here:
+
+https://davidigreen.com/blog/reverse-engineering-the-hp-prime-lcd-and-replacing-it-with-an-ips-panel
+
+The FPGA programming phase of the project represents an experiment in evaluating the maturity of agentic AI for FPGA development work. Please excuse the slop nature of the repo, as it was built extensively with the help of AI. I hope to rewrite this readme myself later (I'm a real human), but for now, let the LLM-generated text begin!
+
 Reverse-engineering the HP Prime graphing calculator's internal LCD bus on a
 **Sipeed Tang Nano 20K** (Gowin `GW2AR-LV18QN88C8/I7`), and using it to drive a modern
 replacement panel — calculator in, IPS panel out, no computer in the loop.
